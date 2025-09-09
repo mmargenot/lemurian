@@ -1,0 +1,20 @@
+[project]
+name = "lemurian"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Maxwell Margenot", email = "max.margenot@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.107.0",
+    "pydantic>=2.11.7",
+]
+
+[project.scripts]
+lemurian = "lemurian:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
