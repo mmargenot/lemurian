@@ -18,3 +18,9 @@ lemurian = "lemurian:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+local = [
+    "outlines>=1.2.5",
+    "vllm>=0.10.2",
+]

@@ -18,7 +18,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# TODO: add vLLM Provider
 class ModelProvider:
     def __init__(self):
         pass
@@ -101,7 +100,7 @@ class OpenRouter(ModelProvider):
             messages: list[Message],
             all_tools: list[Tool] = []
     ):
-        message_dump = [m.model_dump() for m in messages],
+        message_dump = [m.model_dump() for m in messages]
         response = await self.client.chat.completions.create(
             model=model,
             tools=all_tools,
@@ -121,5 +120,48 @@ class OpenRouter(ModelProvider):
             model=model,
             input=message_dump,
             text_format=response_model,
+        )
+        return response.output_parsed
+
+
+class VLLMProvider(ModelProvider):
+
+    def __init__(self, url: str, port: int):
+        self.base_url = f"http://{url}:{port}/v1"
+        self.client = AsyncOpenAI(base_url=self.base_url, api_key="DUMMY")
+
+    async def complete(
+            self,
+            model: str,
+            messages: list[Message],
+            all_tools: list[Tool] = []
+    ):
+        message_dump = [m.model_dump() for m in messages]
+        tool_call_schemas = [
+            tool.model_dump()
+            for tool in all_tools
+        ]
+        response = await self.client.chat.completions.create(
+            model=model,
+            messages=message_dump,
+            tools=all_tools,
+            tool_choice="auto",
+        )
+        response = response.choices[0].message
+        return response
+    
+    async def structured_completion(
+            self,
+            model: str,
+            messages: list[Message],
+            response_model: BaseModel,
+    ):
+        # TODO: check for async or not and handle it with client
+        message_dump = [m.model_dump() for m in messages]
+        response = await self.client.beta.chat.completions.parse(
+            model=model,
+            messages=message_dump,
+            response_format=response_model,
+            extra_body=dict(guided_decoding_backend="outlines"),
         )
         return response.output_parsed

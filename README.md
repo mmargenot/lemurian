@@ -40,6 +40,16 @@ The `Session` class is a way to preserve state within your agent system. The def
 
 You can extend this state object to add other information that you may need within tools, such as metadata about a user for whom an agent is running a completion or an object that different tools act upon. The `session` parameter in a tool is automatically ignored by the `Tool` decorator when constructing the schema.
 
+## Model Providers
+You can run `lemurian` agents using vLLM. Make sure that you are serving the model that you want via vLLM on the machine, like so:
+```
+uv run --extra local vllm serve "Qwen/Qwen3-8B" --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3
+```
+
+Then you can define `VLLMProvider` that points to the address of the served model and define an agent with that provider.
+
+Make sure to refer to the [vLLM docs](https://qwen.readthedocs.io/en/latest/deployment/vllm.html#parsing-tool-calls) to pair the appropriate tool call parser with the model that you want to serve. Additionally, if the model performs reasoning (or "thinking"), make sure to include a **reasoning parser** to remove the thinking sections if you don't expressly want them in your transcripts.
+
 # Development
 
 `lemurian` is work in progress for agent-based experimentation. Feel free to suggest issues or modifications.
