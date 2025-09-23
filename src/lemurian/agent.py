@@ -82,8 +82,8 @@ class Agent:
                 messages=session.transcript
             )
 
-            logger.debug('No tool calls found')
             if not response.tool_calls:
+                logger.debug('No tool calls found')
                 session.transcript.append(
                     Message(
                         role=MessageRole.ASSISTANT,
