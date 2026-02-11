@@ -24,3 +24,6 @@ local = [
     "outlines>=1.2.5",
     "vllm>=0.10.2",
 ]
+modal = [
+    "modal>=0.73.0",
+]

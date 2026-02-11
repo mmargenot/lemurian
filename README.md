@@ -41,14 +41,85 @@ The `Session` class is a way to preserve state within your agent system. The def
 You can extend this state object to add other information that you may need within tools, such as metadata about a user for whom an agent is running a completion or an object that different tools act upon. The `session` parameter in a tool is automatically ignored by the `Tool` decorator when constructing the schema.
 
 ## Model Providers
-You can run `lemurian` agents using vLLM. Make sure that you are serving the model that you want via vLLM on the machine, like so:
+
+### Local vLLM
+You can run `lemurian` agents using vLLM locally. Make sure that you are serving the model that you want via vLLM on the machine, like so:
 ```
 uv run --extra local vllm serve "Qwen/Qwen3-8B" --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3
 ```
 
-Then you can define `VLLMProvider` that points to the address of the served model and define an agent with that provider.
+Then you can define `VLLMProvider` that points to the address of the served model and define an agent with that provider:
+```python
+from lemurian.provider import VLLMProvider
+
+provider = VLLMProvider(url="localhost", port=8000)
+agent = MyAgent(model="Qwen/Qwen3-8B", provider=provider)
+```
 
 Make sure to refer to the [vLLM docs](https://qwen.readthedocs.io/en/latest/deployment/vllm.html#parsing-tool-calls) to pair the appropriate tool call parser with the model that you want to serve. Additionally, if the model performs reasoning (or "thinking"), make sure to include a **reasoning parser** to remove the thinking sections if you don't expressly want them in your transcripts.
+
+### Modal vLLM (Remote/Serverless)
+You can deploy vLLM to [Modal](https://modal.com) for serverless GPU inference. This is useful when you don't have a local GPU or want to scale your inference workloads.
+
+#### Setup
+1. Install Modal dependencies:
+```bash
+uv sync --group modal
+```
+
+2. Authenticate with Modal:
+```bash
+modal setup
+```
+
+3. (Optional) Create a HuggingFace secret for gated models:
+```bash
+modal secret create huggingface-secret HF_TOKEN=<your-token>
+```
+
+#### Deploying vLLM to Modal
+Deploy the vLLM server to Modal:
+```bash
+modal deploy src/scripts/modal_vllm.py
+```
+
+You can customize the deployment with environment variables:
+```bash
+# Deploy with a different model
+MODEL_ID="meta-llama/Llama-3.1-8B-Instruct" modal deploy src/scripts/modal_vllm.py
+
+# Deploy with more GPUs for larger models
+MODEL_ID="Qwen/Qwen3-32B" GPU_COUNT=2 modal deploy src/scripts/modal_vllm.py
+
+# Use a different GPU type
+GPU_TYPE="H100" modal deploy src/scripts/modal_vllm.py
+```
+
+After deployment, Modal will display the endpoint URL (e.g., `https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run`).
+
+#### Using the Modal Provider
+```python
+from lemurian.provider import ModalVLLMProvider
+
+provider = ModalVLLMProvider(
+    endpoint_url="https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run"
+)
+agent = MyAgent(model="Qwen/Qwen3-8B", provider=provider)
+```
+
+#### Pre-downloading Models
+To speed up cold starts, you can pre-download model weights:
+```bash
+modal run src/scripts/modal_vllm.py --download
+```
+
+#### Configuration Options
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `MODEL_ID` | `Qwen/Qwen3-8B` | HuggingFace model ID |
+| `GPU_TYPE` | `A100` | Modal GPU type (A10G, A100, H100) |
+| `GPU_COUNT` | `1` | Number of GPUs for tensor parallelism |
+| `MAX_MODEL_LEN` | `8192` | Maximum sequence length |
 
 # Development
 
