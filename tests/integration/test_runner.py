@@ -259,10 +259,10 @@ class TestRunnerMaxTurns:
 
 class TestRunnerErrorPaths:
     @pytest.mark.asyncio
-    async def test_tool_exception_propagates(
+    async def test_tool_exception_recorded_in_transcript(
         self, make_agent, mock_provider
     ):
-        """When a tool raises, the exception propagates to the caller."""
+        """When a tool raises, the error is recorded and the loop continues."""
 
         @tool
         def explode(msg: str):
@@ -271,18 +271,23 @@ class TestRunnerErrorPaths:
 
         mock_provider.responses = [
             make_tool_call_response("explode", {"msg": "test"}),
+            make_text_response("Recovered"),
         ]
         agent = make_agent(tools=[explode])
         session = Session(session_id="s1")
 
-        with pytest.raises(RuntimeError, match="boom: test"):
-            await Runner().run(agent, session, State())
+        result = await Runner().run(agent, session, State())
+
+        assert result.last_message.content == "Recovered"
+        error_msg = session.transcript[1]
+        assert isinstance(error_msg, ToolCallResultMessage)
+        assert "boom: test" in error_msg.content
 
     @pytest.mark.asyncio
-    async def test_invalid_json_arguments_raises(
+    async def test_invalid_json_arguments_recorded_in_transcript(
         self, make_agent, mock_provider
     ):
-        """Malformed JSON in tool_call arguments raises JSONDecodeError."""
+        """Malformed JSON in tool_call arguments is recorded as an error."""
         bad_response = MockResponse(
             tool_calls=[
                 MockToolCall(
@@ -295,12 +300,16 @@ class TestRunnerErrorPaths:
                 )
             ]
         )
-        mock_provider.responses = [bad_response]
+        mock_provider.responses = [bad_response, make_text_response("OK")]
         agent = make_agent(tools=[echo])
         session = Session(session_id="s1")
 
-        with pytest.raises(json.JSONDecodeError):
-            await Runner().run(agent, session, State())
+        result = await Runner().run(agent, session, State())
+
+        assert result.last_message.content == "OK"
+        error_msg = session.transcript[1]
+        assert isinstance(error_msg, ToolCallResultMessage)
+        assert "invalid arguments" in error_msg.content
 
     @pytest.mark.asyncio
     async def test_tool_returns_none_serializes_as_null(

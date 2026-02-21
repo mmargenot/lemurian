@@ -175,12 +175,28 @@ class Swarm:
                     state=self.state,
                 )
 
+            # Validate handoff target exists
+            target = result.hand_off.target_agent
+            if target not in self.agents:
+                logger.warning(f"Handoff target '{target}' not found")
+                error_msg = Message(
+                    role=MessageRole.ASSISTANT,
+                    content=f"Error: agent '{target}' not found.",
+                )
+                self.session.transcript.append(error_msg)
+                return SwarmResult(
+                    last_message=error_msg,
+                    active_agent=self.active_agent_name,
+                    session=self.session,
+                    state=self.state,
+                )
+
             # Handoff occurred — append handoff message as user context for new agent
             self.session.transcript.append(
                 Message(role=MessageRole.USER, content=result.hand_off.message)
             )
             self.context_start = len(self.session.transcript) - 1
-            self.active_agent_name = result.hand_off.target_agent
+            self.active_agent_name = target
             logger.info(f"Handoff to {self.active_agent_name} at context_start={self.context_start}")
 
         # Max handoffs exceeded

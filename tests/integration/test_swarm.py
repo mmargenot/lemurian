@@ -190,6 +190,35 @@ class TestSwarmHandoff:
         )
 
     @pytest.mark.asyncio
+    async def test_handoff_to_nonexistent_agent(self):
+        """Handoff to an unregistered agent returns an error message."""
+        provider = MockProvider()
+        from lemurian.agent import Agent
+
+        a = Agent(
+            name="a", description="A",
+            system_prompt="A.", model="m", provider=provider,
+        )
+        b = Agent(
+            name="b", description="B",
+            system_prompt="B.", model="m", provider=provider,
+        )
+        swarm = Swarm(agents=[a, b])
+
+        # The LLM hallucinates a handoff to an agent that doesn't exist
+        provider.responses = [
+            make_tool_call_response(
+                "handoff",
+                {"agent_name": "ghost", "message": "go to ghost"},
+            ),
+        ]
+
+        result = await swarm.run("hello", agent="a")
+
+        assert "not found" in result.last_message.content
+        assert result.active_agent == "a"
+
+    @pytest.mark.asyncio
     async def test_max_handoffs_exceeded(self):
         provider = MockProvider()
         from lemurian.agent import Agent
