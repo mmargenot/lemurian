@@ -11,7 +11,7 @@ class MessageRole(Enum):
 
 class Message(BaseModel):
     role: MessageRole
-    content: str
+    content: str | None = None
 
     @field_serializer('role')
     def serialize_role(self, role: MessageRole, _info) -> str:

@@ -1,126 +1,222 @@
 # `lemurian`
 
-`lemurian` is a framework for building artificial intelligence (AI) agents in Python.
+`lemurian` is a framework for building AI agents in Python.
 
-Create an Agent by subclassing `lemurian.agents.Agent` and implementing the `get_all_tools` function. This function could return a collection of tools that broadly have the shape:
+## Architecture
 
-```
-from lemurian.tools import Tool
-from lemurian.session import Session
+| Layer | Components | Role |
+|---|---|---|
+| **Orchestration** | Swarm | Registers agents, creates handoff tool, manages handoff loop, tracks active agent |
+| **Execution** | Runner | Mediates all transcript access: builds messages for provider, injects system prompt, appends responses and tool results, detects handoffs |
+| **Interface** | Context, Tools, Provider | Tools use Context to access state/session/agent. Provider receives pre-built messages and schemas. |
+| **Data** | Session, State | Session holds the transcript (ground truth). State holds typed application data. |
 
+**Tool** — A `@tool`-decorated Python function exposed to an LLM. Schema is generated from the function signature. Receives a `Context` for accessing state, session, and agent.
 
-@Tool
-def my_first_tool(session: Session, param_1: int) -> int:
-    """
-    Detailed documentation around `my_first_tool` using Google-style
-    docstrings. Make sure to _exclude_ `session` here, as it is a "magic"
-    variable that is ignored by the `Tool` decorator.
+**Agent** — Declarative Pydantic model bundling a system prompt, tools, model name, and provider. Agents don't run themselves — the Runner executes them.
 
-    Args:
-        param_1: Description of what `param_1` is and what it's for.
+**Runner** — The agent loop. Builds messages for the provider, dispatches tool calls, serializes results, detects handoffs. The only component that reads or writes the transcript.
 
-    Returns:
-        return_1: Description of object / information that is returned by the
-            function.
-    """
-    pass
-```
+**Session** — A single conversation transcript shared across all agents in a Swarm.
 
-It is important to have a detailed docstring, as this description is sent to the tool-calling provider to give context to the large language model (LLM) that will call your tool.
+**State** — Typed Pydantic model for application data. Subclass it to add fields. Mutated in-place through `context.state`.
+
+**Context** — Passed automatically to any tool declaring a `context` parameter. Holds references to session, state, and agent.
+
+**Swarm** — Multi-agent orchestrator. Creates a dynamic `handoff` tool with an enum of available agents. Fresh-context handoffs: each agent sees only the handoff message onward.
+
+**Provider** — Abstraction over LLM APIs. Implementations for OpenAI, OpenRouter, local vLLM, and Modal vLLM.
 
 ## Defining Tools
 
-Within the the `lemurian` agent framework, there are two key classes:
-- `lemurian.tools.Tool`
-- `lemurian.session.Session`
+Use the `@tool` decorator on any function. The schema is generated from the type hints and docstring:
 
-The `Tool` class is used as a Python decorator that does a lot of heavy lifting for us. Adding `@Tool` to a function turns that function into a `pydantic.BaseModel` class whose schema is automatically generated from the type hints and docstrings that you provide. The end result is that you don't need to define that schema yourself.
+```python
+from lemurian.tools import tool
 
-The `Session` class is a way to preserve state within your agent system. The default `respond` implementation of an `Agent` looks at the `Message` transcript that is stored in the state and uses that to generate the tool calls and response from your model provider.
+@tool
+def lookup_customer(email: str):
+    """Find a customer by their email address."""
+    return {"customer_id": "CUST-123", "name": "Jane Doe"}
+```
 
-You can extend this state object to add other information that you may need within tools, such as metadata about a user for whom an agent is running a completion or an object that different tools act upon. The `session` parameter in a tool is automatically ignored by the `Tool` decorator when constructing the schema.
+You can override the name and description:
+
+```python
+@tool(name="search", description="Search the knowledge base")
+def kb_search(query: str, limit: int = 10):
+    ...
+```
+
+Async functions work the same way:
+
+```python
+@tool
+async def fetch_data(url: str):
+    """Fetch data from a URL."""
+    ...
+```
+
+To access state, session, or the current agent, add a `context` parameter. It is automatically excluded from the schema and injected at call time:
+
+```python
+from lemurian.context import Context
+
+@tool
+def update_counter(context: Context, amount: int):
+    """Increment the counter in state."""
+    context.state.counter += amount
+    return context.state.counter
+```
+
+## Single Agent
+
+```python
+import asyncio
+from lemurian.tools import tool
+from lemurian.agent import Agent
+from lemurian.runner import Runner
+from lemurian.session import Session
+from lemurian.state import State
+from lemurian.message import Message, MessageRole
+from lemurian.provider import OpenAIProvider
+
+@tool
+def greet(name: str):
+    """Greet someone by name."""
+    return f"Hello, {name}!"
+
+agent = Agent(
+    name="greeter",
+    system_prompt="You are a friendly greeter. Use the greet tool when asked.",
+    tools=[greet],
+    model="gpt-4o-mini",
+    provider=OpenAIProvider(),
+)
+
+async def main():
+    session = Session(session_id="demo")
+    session.transcript.append(
+        Message(role=MessageRole.USER, content="Say hi to Alice")
+    )
+    result = await Runner().run(agent, session, State())
+    print(result.last_message.content)
+
+asyncio.run(main())
+```
+
+## Multi-Agent Swarm
+
+```python
+import asyncio
+from lemurian.tools import tool
+from lemurian.agent import Agent
+from lemurian.swarm import Swarm
+from lemurian.state import State
+from lemurian.provider import OpenAIProvider
+
+@tool
+def check_invoice(invoice_id: str):
+    """Check the status of an invoice."""
+    return {"amount": 49.99, "status": "paid"}
+
+provider = OpenAIProvider()
+
+triage = Agent(
+    name="triage",
+    description="Routes customer requests to the right agent",
+    system_prompt="Route customer requests to the appropriate agent.",
+    model="gpt-4o-mini",
+    provider=provider,
+)
+
+billing = Agent(
+    name="billing",
+    description="Handles billing and invoice questions",
+    system_prompt="Help customers with billing inquiries.",
+    tools=[check_invoice],
+    model="gpt-4o-mini",
+    provider=provider,
+)
+
+async def main():
+    swarm = Swarm(agents=[triage, billing])
+    result = await swarm.run("I have a question about my invoice", agent="triage")
+    print(f"[{result.active_agent}] {result.last_message.content}")
+
+asyncio.run(main())
+```
+
+The Swarm automatically creates a `handoff` tool for each agent with an enum of available targets. When triage calls `handoff(agent_name="billing", message="...")`, the Swarm switches context to the billing agent.
 
 ## Model Providers
 
-### Local vLLM
-You can run `lemurian` agents using vLLM locally. Make sure that you are serving the model that you want via vLLM on the machine, like so:
-```
-uv run --extra local vllm serve "Qwen/Qwen3-8B" --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3
+### OpenAI / OpenRouter
+
+```python
+from lemurian.provider import OpenAIProvider, OpenRouter
+
+provider = OpenAIProvider()    # uses OPENAI_API_KEY env var
+provider = OpenRouter()        # uses OPENROUTER_API_KEY env var
 ```
 
-Then you can define `VLLMProvider` that points to the address of the served model and define an agent with that provider:
+### Local vLLM
+
+Serve a model with vLLM:
+```bash
+uv run --extra local vllm serve "Qwen/Qwen3-8B" \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3
+```
+
 ```python
 from lemurian.provider import VLLMProvider
 
 provider = VLLMProvider(url="localhost", port=8000)
-agent = MyAgent(model="Qwen/Qwen3-8B", provider=provider)
 ```
 
-Make sure to refer to the [vLLM docs](https://qwen.readthedocs.io/en/latest/deployment/vllm.html#parsing-tool-calls) to pair the appropriate tool call parser with the model that you want to serve. Additionally, if the model performs reasoning (or "thinking"), make sure to include a **reasoning parser** to remove the thinking sections if you don't expressly want them in your transcripts.
+Refer to the [vLLM docs](https://qwen.readthedocs.io/en/latest/deployment/vllm.html#parsing-tool-calls) to pair the appropriate tool call parser with your model.
 
 ### Modal vLLM (Remote/Serverless)
-You can deploy vLLM to [Modal](https://modal.com) for serverless GPU inference. This is useful when you don't have a local GPU or want to scale your inference workloads.
 
-#### Setup
-1. Install Modal dependencies:
+Deploy vLLM to [Modal](https://modal.com) for serverless GPU inference:
+
 ```bash
 uv sync --group modal
-```
-
-2. Authenticate with Modal:
-```bash
 modal setup
-```
-
-3. (Optional) Create a HuggingFace secret for gated models:
-```bash
-modal secret create huggingface-secret HF_TOKEN=<your-token>
-```
-
-#### Deploying vLLM to Modal
-Deploy the vLLM server to Modal:
-```bash
 modal deploy src/scripts/modal_vllm.py
 ```
 
-You can customize the deployment with environment variables:
-```bash
-# Deploy with a different model
-MODEL_ID="meta-llama/Llama-3.1-8B-Instruct" modal deploy src/scripts/modal_vllm.py
-
-# Deploy with more GPUs for larger models
-MODEL_ID="Qwen/Qwen3-32B" GPU_COUNT=2 modal deploy src/scripts/modal_vllm.py
-
-# Use a different GPU type
-GPU_TYPE="H100" modal deploy src/scripts/modal_vllm.py
-```
-
-After deployment, Modal will display the endpoint URL (e.g., `https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run`).
-
-#### Using the Modal Provider
 ```python
 from lemurian.provider import ModalVLLMProvider
 
 provider = ModalVLLMProvider(
     endpoint_url="https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run"
 )
-agent = MyAgent(model="Qwen/Qwen3-8B", provider=provider)
 ```
 
-#### Pre-downloading Models
-To speed up cold starts, you can pre-download model weights:
-```bash
-modal run src/scripts/modal_vllm.py --download
-```
+Customize deployments with environment variables:
 
-#### Configuration Options
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
+| Variable | Default | Description |
+|---|---|---|
 | `MODEL_ID` | `Qwen/Qwen3-8B` | HuggingFace model ID |
 | `GPU_TYPE` | `A100` | Modal GPU type (A10G, A100, H100) |
 | `GPU_COUNT` | `1` | Number of GPUs for tensor parallelism |
 | `MAX_MODEL_LEN` | `8192` | Maximum sequence length |
 
-# Development
+Pre-download model weights for faster cold starts:
+```bash
+modal run src/scripts/modal_vllm.py --download
+```
+
+## Testing
+
+```bash
+uv run pytest
+uv run pytest --cov=lemurian --cov-report=term-missing
+```
+
+## Development
 
 `lemurian` is work in progress for agent-based experimentation. Feel free to suggest issues or modifications.

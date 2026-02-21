@@ -1,10 +1,7 @@
 from pydantic import BaseModel
-from openai import OpenAI, AsyncOpenAI
+from openai import AsyncOpenAI
 import os
 import logging
-
-from lemurian.message import Message
-from lemurian.tools import Tool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,15 +22,15 @@ class ModelProvider:
     async def complete(
             self,
             model: str,
-            messages: list[Message],
-            all_tools: list[Tool] = []
+            messages: list[dict],
+            tools: list[dict] | None = None,
     ):
         pass
 
     async def structured_completion(
             self,
             model: str,
-            messages: list[Message],
+            messages: list[dict],
             response_model: BaseModel,
     ):
         pass
@@ -54,28 +51,27 @@ class OpenAIProvider(ModelProvider):
     async def complete(
             self,
             model: str,
-            messages: list[Message],
-            all_tools: list[Tool] = []
+            messages: list[dict],
+            tools: list[dict] | None = None,
     ):
-        message_dump = [m.model_dump() for m in messages]
-        response = await self.client.chat.completions.create(
-            model=model,
-            tools=all_tools,
-            messages=message_dump,
-        )
-        response = response.choices[0].message
-        return response
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        response = await self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message
 
     async def structured_completion(
             self,
             model: str,
-            messages: list[Message],
+            messages: list[dict],
             response_model: BaseModel,
     ):
-        message_dump = [m.model_dump() for m in messages]
         response = await self.client.responses.parse(
             model=model,
-            input=message_dump,
+            input=messages,
             text_format=response_model,
         )
         return response.output_parsed
@@ -97,28 +93,27 @@ class OpenRouter(ModelProvider):
     async def complete(
             self,
             model: str,
-            messages: list[Message],
-            all_tools: list[Tool] = []
+            messages: list[dict],
+            tools: list[dict] | None = None,
     ):
-        message_dump = [m.model_dump() for m in messages]
-        response = await self.client.chat.completions.create(
-            model=model,
-            tools=all_tools,
-            messages=message_dump,
-        )
-        response = response.choices[0].message
-        return response
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        response = await self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message
 
     async def structured_completion(
             self,
             model: str,
-            messages: list[Message],
+            messages: list[dict],
             response_model: BaseModel,
     ):
-        message_dump = [m.model_dump() for m in messages]
         response = await self.client.responses.parse(
             model=model,
-            input=message_dump,
+            input=messages,
             text_format=response_model,
         )
         return response.output_parsed
@@ -133,34 +128,28 @@ class VLLMProvider(ModelProvider):
     async def complete(
             self,
             model: str,
-            messages: list[Message],
-            all_tools: list[Tool] = []
+            messages: list[dict],
+            tools: list[dict] | None = None,
     ):
-        message_dump = [m.model_dump() for m in messages]
-        tool_call_schemas = [
-            tool.model_dump()
-            for tool in all_tools
-        ]
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=message_dump,
-            tools=all_tools,
-            tool_choice="auto",
-        )
-        response = response.choices[0].message
-        return response
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+            "tool_choice": "auto",
+        }
+        if tools:
+            kwargs["tools"] = tools
+        response = await self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message
 
     async def structured_completion(
             self,
             model: str,
-            messages: list[Message],
+            messages: list[dict],
             response_model: BaseModel,
     ):
-        # TODO: check for async or not and handle it with client
-        message_dump = [m.model_dump() for m in messages]
         response = await self.client.beta.chat.completions.parse(
             model=model,
-            messages=message_dump,
+            messages=messages,
             response_format=response_model,
             extra_body=dict(guided_decoding_backend="outlines"),
         )
@@ -182,7 +171,7 @@ class ModalVLLMProvider(ModelProvider):
         provider = ModalVLLMProvider(
             endpoint_url="https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run"
         )
-        agent = MyAgent(model="Qwen/Qwen3-8B", provider=provider)
+        agent = Agent(name="my_agent", model="Qwen/Qwen3-8B", provider=provider, system_prompt="...")
     """
 
     def __init__(
@@ -192,24 +181,12 @@ class ModalVLLMProvider(ModelProvider):
         timeout: float = 300.0,
         max_retries: int = 3,
     ):
-        """
-        Initialize the Modal vLLM provider.
-
-        Args:
-            endpoint_url: The Modal deployment URL (e.g., https://...modal.run)
-            api_key: Optional API key if Modal authentication is configured.
-                     Can also be set via MODAL_VLLM_API_KEY environment variable.
-            timeout: Request timeout in seconds (default: 300.0)
-            max_retries: Maximum number of retries for failed requests (default: 3)
-        """
-        # Ensure URL ends with /v1 for OpenAI compatibility
         self.endpoint_url = endpoint_url.rstrip("/")
         if not self.endpoint_url.endswith("/v1"):
             self.base_url = f"{self.endpoint_url}/v1"
         else:
             self.base_url = self.endpoint_url
 
-        # API key from parameter or environment variable
         if not api_key:
             api_key = os.getenv("MODAL_VLLM_API_KEY", "DUMMY")
 
@@ -224,29 +201,28 @@ class ModalVLLMProvider(ModelProvider):
     async def complete(
             self,
             model: str,
-            messages: list[Message],
-            all_tools: list[Tool] = []
+            messages: list[dict],
+            tools: list[dict] | None = None,
     ):
-        message_dump = [m.model_dump() for m in messages]
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=message_dump,
-            tools=all_tools if all_tools else None,
-            tool_choice="auto" if all_tools else None,
-        )
-        response = response.choices[0].message
-        return response
+        kwargs: dict = {
+            "model": model,
+            "messages": messages,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        response = await self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message
 
     async def structured_completion(
             self,
             model: str,
-            messages: list[Message],
+            messages: list[dict],
             response_model: BaseModel,
     ):
-        message_dump = [m.model_dump() for m in messages]
         response = await self.client.beta.chat.completions.parse(
             model=model,
-            messages=message_dump,
+            messages=messages,
             response_format=response_model,
             extra_body=dict(guided_decoding_backend="outlines"),
         )
