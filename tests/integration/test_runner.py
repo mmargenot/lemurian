@@ -7,7 +7,7 @@ from lemurian.message import Message, MessageRole, ToolCallResultMessage
 from lemurian.runner import Runner
 from lemurian.session import Session
 from lemurian.state import State
-from lemurian.tools import HandoffResult, tool
+from lemurian.tools import HandoffResult, LLMRecoverableError, tool
 
 from tests.conftest import (
     MockFunction,
@@ -282,6 +282,46 @@ class TestRunnerErrorPaths:
         error_msg = session.transcript[1]
         assert isinstance(error_msg, ToolCallResultMessage)
         assert "boom: test" in error_msg.content
+
+    @pytest.mark.asyncio
+    async def test_recoverable_error_injects_guidance(
+        self, make_agent, mock_provider
+    ):
+        """LLMRecoverableError sends the tool's message back as context."""
+
+        @tool
+        def strict_lookup(user_id: int):
+            """Looks up a user by ID."""
+            if user_id <= 0:
+                raise LLMRecoverableError(
+                    "user_id must be positive. Use get_user_id first."
+                )
+            return f"User {user_id}"
+
+        mock_provider.responses = [
+            make_tool_call_response(
+                "strict_lookup", {"user_id": -1}
+            ),
+            make_tool_call_response(
+                "strict_lookup", {"user_id": 42}
+            ),
+            make_text_response("Found the user"),
+        ]
+        agent = make_agent(tools=[strict_lookup])
+        session = Session(session_id="s1")
+
+        result = await Runner().run(agent, session, State())
+
+        assert result.last_message.content == "Found the user"
+        # First call's result is the recovery guidance
+        recovery_msg = session.transcript[1]
+        assert isinstance(recovery_msg, ToolCallResultMessage)
+        assert "user_id must be positive" in recovery_msg.content
+        # No "Error calling" prefix — it's the raw guidance
+        assert not recovery_msg.content.startswith("Error")
+        # Second call succeeded
+        success_msg = session.transcript[3]
+        assert success_msg.content == "User 42"
 
     @pytest.mark.asyncio
     async def test_invalid_json_arguments_recorded_in_transcript(

@@ -21,6 +21,26 @@ class ToolCallResult(BaseModel):
     output: Any
 
 
+class LLMRecoverableError(Exception):
+    """Raised by a tool to send recovery guidance back to the LLM.
+
+    Unlike unexpected exceptions (which produce a generic error message),
+    this carries an intentional message crafted by the tool author to
+    help the LLM retry with correct arguments or approach.
+
+    Example::
+
+        @tool
+        def lookup_user(user_id: int):
+            if user_id <= 0:
+                raise LLMRecoverableError(
+                    "user_id must be a positive integer. "
+                    "Use the get_user_id tool first if you only have a name."
+                )
+            return db.get(user_id)
+    """
+
+
 @dataclass
 class HandoffResult:
     """Returned by a tool to signal an agent handoff.
