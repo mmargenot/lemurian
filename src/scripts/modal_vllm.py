@@ -157,7 +157,6 @@ class VLLMServer:
         # Import and include the OpenAI API router
         from vllm.entrypoints.openai.api_server import (
             router as openai_router,
-            mount_metrics,
         )
 
         app.include_router(openai_router)
@@ -214,7 +213,7 @@ def main(download: bool = False):
     else:
         print(f"Deploy with: modal deploy {__file__}")
         print(f"Or serve temporarily with: modal serve {__file__}")
-        print(f"\nCurrent configuration:")
+        print("\nCurrent configuration:")
         print(f"  Model: {MODEL_ID}")
         print(f"  GPU: {GPU_TYPE} x {GPU_COUNT}")
         print(f"  Max sequence length: {MAX_MODEL_LEN}")
