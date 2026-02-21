@@ -1,6 +1,6 @@
 [project]
 name = "lemurian"
-version = "1.0.0"
+version = "1.1.0"
 description = "A framework for building AI agents in Python"
 readme = "README.md"
 authors = [
@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "docstring-parser>=0.16",
     "openai>=1.107.0",
     "pydantic>=2.11.7",
 ]
