@@ -1,7 +1,7 @@
 [project]
 name = "lemurian"
 version = "1.0.0"
-description = "Add your description here"
+description = "A framework for building AI agents in Python"
 readme = "README.md"
 authors = [
     { name = "Maxwell Margenot", email = "max.margenot@gmail.com" }
@@ -11,9 +11,6 @@ dependencies = [
     "openai>=1.107.0",
     "pydantic>=2.11.7",
 ]
-
-[project.scripts]
-lemurian = "lemurian:main"
 
 [build-system]
 requires = ["hatchling"]
