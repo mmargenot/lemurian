@@ -4,6 +4,7 @@ from lemurian.tools import (
     Tool,
     ToolCallResult,
     _build_parameters_schema,
+    _parse_param_descriptions,
     tool,
 )
 
@@ -12,11 +13,10 @@ from lemurian.tools import (
 # Schema generation (_build_parameters_schema)
 # ---------------------------------------------------------------------------
 
+
 class TestBuildParametersSchema:
     def test_python_types_map_to_json_schema_types(self):
-        def func(
-            a: str, b: int, c: float, d: bool, e: list, f: dict
-        ):
+        def func(a: str, b: int, c: float, d: bool, e: list, f: dict):
             pass
 
         schema, _ = _build_parameters_schema(func)
@@ -51,8 +51,183 @@ class TestBuildParametersSchema:
 
 
 # ---------------------------------------------------------------------------
+# Docstring param description parsing (_parse_param_descriptions)
+# ---------------------------------------------------------------------------
+
+
+class TestParseParamDescriptions:
+    def test_google_style(self):
+        def func(name: str, age: int):
+            """Do something.
+
+            Args:
+                name: The user's name.
+                age: The user's age.
+            """
+
+        descs = _parse_param_descriptions(func)
+        assert descs == {
+            "name": "The user's name.",
+            "age": "The user's age.",
+        }
+
+    def test_google_style_with_type_in_docstring(self):
+        def func(name, age):
+            """Do something.
+
+            Args:
+                name (str): The user's name.
+                age (int): The user's age.
+            """
+
+        descs = _parse_param_descriptions(func)
+        assert descs == {
+            "name": "The user's name.",
+            "age": "The user's age.",
+        }
+
+    def test_sphinx_rest_style(self):
+        def func(name: str, age: int):
+            """Do something.
+
+            :param name: The user's name.
+            :param age: The user's age.
+            """
+
+        descs = _parse_param_descriptions(func)
+        assert descs == {
+            "name": "The user's name.",
+            "age": "The user's age.",
+        }
+
+    def test_numpy_style(self):
+        def func(name: str, age: int):
+            """Do something.
+
+            Parameters
+            ----------
+            name : str
+                The user's name.
+            age : int
+                The user's age.
+            """
+
+        descs = _parse_param_descriptions(func)
+        assert descs == {
+            "name": "The user's name.",
+            "age": "The user's age.",
+        }
+
+    def test_no_docstring(self):
+        def func(x: str):
+            pass
+
+        assert _parse_param_descriptions(func) == {}
+
+    def test_docstring_without_params_section(self):
+        def func(x: str):
+            """Just a summary."""
+
+        assert _parse_param_descriptions(func) == {}
+
+    def test_multiline_description(self):
+        def func(query: str):
+            """Search.
+
+            Args:
+                query: The search query string.
+                    Supports boolean operators
+                    and wildcards.
+            """
+
+        descs = _parse_param_descriptions(func)
+        assert "query" in descs
+        assert "boolean operators" in descs["query"]
+        assert "wildcards" in descs["query"]
+
+    def test_context_param_in_docstring_ignored_by_schema(self):
+        """Documented context param doesn't leak into the schema."""
+
+        def func(context, query: str):
+            """Search.
+
+            Args:
+                context: The runtime context.
+                query: The search query.
+            """
+
+        schema, _ = _build_parameters_schema(func)
+        assert "context" not in schema["properties"]
+        assert schema["properties"]["query"]["description"] == (
+            "The search query."
+        )
+
+    def test_undocumented_param_gets_empty_description(self):
+        def func(a: str, b: int):
+            """Do something.
+
+            Args:
+                a: Documented param.
+            """
+
+        schema, _ = _build_parameters_schema(func)
+        assert schema["properties"]["a"]["description"] == (
+            "Documented param."
+        )
+        assert schema["properties"]["b"]["description"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Param descriptions flow through to @tool schema
+# ---------------------------------------------------------------------------
+
+
+class TestToolParamDescriptions:
+    def test_google_descriptions_in_tool_schema(self):
+        @tool
+        def search(query: str, max_results: int = 10):
+            """Search the knowledge base.
+
+            Args:
+                query: The search query string.
+                max_results: Maximum results to return.
+            """
+
+        schema = search.model_dump()
+        params = schema["function"]["parameters"]["properties"]
+        assert params["query"]["description"] == ("The search query string.")
+        assert params["max_results"]["description"] == (
+            "Maximum results to return."
+        )
+
+    def test_rest_descriptions_in_tool_schema(self):
+        @tool
+        def lookup(user_id: int):
+            """Look up a user.
+
+            :param user_id: The ID of the user to look up.
+            """
+
+        schema = lookup.model_dump()
+        params = schema["function"]["parameters"]["properties"]
+        assert params["user_id"]["description"] == (
+            "The ID of the user to look up."
+        )
+
+    def test_no_params_section_still_works(self):
+        @tool
+        def greet(name: str):
+            """Say hello."""
+
+        schema = greet.model_dump()
+        params = schema["function"]["parameters"]["properties"]
+        assert params["name"]["description"] == ""
+
+
+# ---------------------------------------------------------------------------
 # @tool decorator — two code paths
 # ---------------------------------------------------------------------------
+
 
 class TestToolDecorator:
     def test_bare_decorator(self):
@@ -78,6 +253,7 @@ class TestToolDecorator:
 # ---------------------------------------------------------------------------
 # Tool.model_dump — OpenAI-compatible schema
 # ---------------------------------------------------------------------------
+
 
 def test_tool_model_dump_openai_format():
     @tool
@@ -105,6 +281,7 @@ def test_tool_model_dump_openai_format():
 # ---------------------------------------------------------------------------
 # Tool.__call__ — sync/async dispatch and output type
 # ---------------------------------------------------------------------------
+
 
 class TestToolCall:
     @pytest.mark.asyncio

@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, get_type_hints
 
+from docstring_parser import parse as parse_docstring
 from pydantic import BaseModel, Field
 
 
@@ -90,6 +91,7 @@ def _json_type(python_type_name: str) -> str:
 # Tool model
 # ---------------------------------------------------------------------------
 
+
 class Tool(BaseModel):
     """A callable tool with an OpenAI-compatible function schema.
 
@@ -144,8 +146,28 @@ class Tool(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Docstring parameter description extraction
+# ---------------------------------------------------------------------------
+
+
+def _parse_param_descriptions(func: Callable) -> dict[str, str]:
+    """Extract ``{param_name: description}`` from *func*'s docstring.
+
+    Uses ``docstring_parser`` with auto-detection so Google, NumPy,
+    Sphinx/reST, and Epydoc styles are all supported. Returns an
+    empty dict when there is no docstring or no documented params.
+    """
+    doc = func.__doc__
+    if not doc:
+        return {}
+    parsed = parse_docstring(doc)
+    return {p.arg_name: (p.description or "") for p in parsed.params}
+
+
+# ---------------------------------------------------------------------------
 # Schema extraction from a function signature
 # ---------------------------------------------------------------------------
+
 
 def _build_parameters_schema(func: Callable) -> tuple[dict, list[str]]:
     """Extract JSON-schema properties and required list from *func*.
@@ -155,6 +177,7 @@ def _build_parameters_schema(func: Callable) -> tuple[dict, list[str]]:
     """
     sig = inspect.signature(func)
     hints = get_type_hints(func)
+    param_descs = _parse_param_descriptions(func)
 
     properties: dict[str, dict[str, str]] = {}
     required: list[str] = []
@@ -164,11 +187,13 @@ def _build_parameters_schema(func: Callable) -> tuple[dict, list[str]]:
             continue
 
         annotation = hints.get(name)
-        type_name = getattr(annotation, "__name__", "str") if annotation else "str"
+        type_name = (
+            getattr(annotation, "__name__", "str") if annotation else "str"
+        )
 
         properties[name] = {
             "type": _json_type(type_name),
-            "description": "",
+            "description": param_descs.get(name, ""),
         }
 
         if param.default is inspect.Parameter.empty:
@@ -186,12 +211,19 @@ def _build_parameters_schema(func: Callable) -> tuple[dict, list[str]]:
 # @tool decorator
 # ---------------------------------------------------------------------------
 
-def tool(func: Callable | None = None, *, name: str | None = None, description: str | None = None) -> Tool | Callable:
+
+def tool(
+    func: Callable | None = None,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+) -> Tool | Callable:
     """Decorator that turns a function into a :class:`Tool`.
 
     Can be used bare (``@tool``) or with keyword arguments
     (``@tool(name="...", description="...")``).
     """
+
     def _wrap(fn: Callable) -> Tool:
         tool_name = name or fn.__name__
         tool_description = description or fn.__doc__ or ""
