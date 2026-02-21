@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SwarmResult:
+    """The result of a Swarm.run() invocation.
+
+    Args:
+        last_message: The final message from the active agent.
+        active_agent: Name of the agent that produced the final message.
+        session: The session containing the full transcript.
+        state: The application state after execution.
+    """
+
     last_message: Message
     active_agent: str
     session: Session
@@ -24,6 +33,22 @@ class SwarmResult:
 
 
 class Swarm:
+    """Multi-agent orchestrator with dynamic handoffs.
+
+    Manages a registry of agents and a single shared session. On each
+    ``run()`` call, the Swarm injects a ``handoff`` tool into the active
+    agent and runs the Runner. If a handoff occurs, the Swarm advances
+    the context window and switches to the target agent.
+
+    Stateful across ``run()`` calls — the same session and state persist.
+
+    Args:
+        agents: List of agents to register.
+        state: Application state, or a default empty State.
+        runner: Runner instance, or a default Runner.
+        max_handoffs: Maximum handoffs allowed per ``run()`` call.
+    """
+
     def __init__(
         self,
         agents: list[Agent],
@@ -40,6 +65,15 @@ class Swarm:
         self.context_start: int = 0
 
     def _create_handoff_tool(self, current_agent_name: str) -> Tool:
+        """Create a handoff tool excluding the current agent from the enum.
+
+        Args:
+            current_agent_name: The active agent to exclude from the
+                list of available handoff targets.
+
+        Returns:
+            A Tool whose schema includes an enum of other agent names.
+        """
         available = {
             name: agent.description
             for name, agent in self.agents.items()
@@ -82,6 +116,24 @@ class Swarm:
         return augmented
 
     async def run(self, user_message: str, agent: str | None = None) -> SwarmResult:
+        """Append a user message and run the agent loop.
+
+        On the first call, ``agent`` is required to set the initial
+        active agent. On subsequent calls, the Swarm continues with
+        the current active agent unless ``agent`` is specified.
+
+        Args:
+            user_message: The user's message to append to the transcript.
+            agent: Name of the agent to run. Required on first call,
+                optional thereafter.
+
+        Returns:
+            A SwarmResult with the final message, active agent, session,
+            and state.
+
+        Raises:
+            ValueError: If ``agent`` is not provided on the first call.
+        """
         # First call — initialise session and active agent
         if self.session is None:
             if agent is None:

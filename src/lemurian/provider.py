@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 class ModelProvider:
+    """Base class for model providers.
+
+    Subclass this to implement a provider for a specific LLM API.
+    Providers receive pre-built message and tool schema dicts from
+    the Runner — they do not interact with lemurian types directly.
+    """
+
     def __init__(self):
         pass
 
@@ -25,6 +32,16 @@ class ModelProvider:
             messages: list[dict],
             tools: list[dict] | None = None,
     ):
+        """Send a chat completion request to the model.
+
+        Args:
+            model: The model identifier.
+            messages: List of message dicts in OpenAI format.
+            tools: List of tool schema dicts, or None if no tools.
+
+        Returns:
+            The provider's response message object.
+        """
         pass
 
     async def structured_completion(
@@ -33,10 +50,26 @@ class ModelProvider:
             messages: list[dict],
             response_model: BaseModel,
     ):
+        """Send a completion request expecting a structured response.
+
+        Args:
+            model: The model identifier.
+            messages: List of message dicts in OpenAI format.
+            response_model: A Pydantic model defining the response schema.
+
+        Returns:
+            The parsed response matching the response_model.
+        """
         pass
 
 
 class OpenAIProvider(ModelProvider):
+    """Provider for the OpenAI API.
+
+    Args:
+        api_key: OpenAI API key. Falls back to the ``OPENAI_API_KEY``
+            environment variable if not provided.
+    """
 
     def __init__(self, api_key: str | None = None):
         if not api_key:
@@ -78,6 +111,12 @@ class OpenAIProvider(ModelProvider):
 
 
 class OpenRouter(ModelProvider):
+    """Provider for the OpenRouter API.
+
+    Args:
+        api_key: OpenRouter API key. Falls back to the
+            ``OPENROUTER_API_KEY`` environment variable if not provided.
+    """
 
     def __init__(self, api_key: str | None = None):
         if not api_key:
@@ -120,6 +159,12 @@ class OpenRouter(ModelProvider):
 
 
 class VLLMProvider(ModelProvider):
+    """Provider for a locally-served vLLM instance.
+
+    Args:
+        url: Hostname or IP of the vLLM server.
+        port: Port the vLLM server is listening on.
+    """
 
     def __init__(self, url: str, port: int):
         self.base_url = f"http://{url}:{port}/v1"
@@ -157,21 +202,18 @@ class VLLMProvider(ModelProvider):
 
 
 class ModalVLLMProvider(ModelProvider):
-    """
-    Provider for vLLM deployed on Modal.
+    """Provider for vLLM deployed on Modal.
 
-    This provider connects to a vLLM instance hosted on Modal's serverless
-    infrastructure. Deploy vLLM to Modal using the modal_vllm.py script:
+    Connects to a vLLM instance hosted on Modal's serverless
+    infrastructure. Deploy with ``modal deploy src/scripts/modal_vllm.py``.
 
-        modal deploy src/scripts/modal_vllm.py
-
-    The deployment URL will be displayed after deployment completes.
-
-    Example:
-        provider = ModalVLLMProvider(
-            endpoint_url="https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run"
-        )
-        agent = Agent(name="my_agent", model="Qwen/Qwen3-8B", provider=provider, system_prompt="...")
+    Args:
+        endpoint_url: The Modal deployment URL
+            (e.g. ``https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run``).
+        api_key: Optional API key. Falls back to the
+            ``MODAL_VLLM_API_KEY`` environment variable, or ``"DUMMY"``.
+        timeout: Request timeout in seconds.
+        max_retries: Maximum retries for failed requests.
     """
 
     def __init__(

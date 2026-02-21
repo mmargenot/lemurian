@@ -10,12 +10,29 @@ from pydantic import BaseModel, Field
 
 
 class ToolCallResult(BaseModel):
+    """The result of executing a tool.
+
+    Args:
+        tool_name: Name of the tool that produced this result.
+        output: The return value of the tool function. Can be any type.
+    """
+
     tool_name: str
     output: Any
 
 
 @dataclass
 class HandoffResult:
+    """Returned by a tool to signal an agent handoff.
+
+    When the Runner detects a HandoffResult as a tool's output, it
+    stops execution and returns control to the Swarm for agent switching.
+
+    Args:
+        target_agent: Name of the agent to hand off to.
+        message: Context and instructions for the next agent.
+    """
+
     target_agent: str
     message: str
 
@@ -38,6 +55,14 @@ _PYTHON_TO_JSON_TYPE: dict[str, str] = {
 
 
 def _json_type(python_type_name: str) -> str:
+    """Map a Python type name to its JSON schema type string.
+
+    Args:
+        python_type_name: The ``__name__`` of a Python type (e.g. ``"str"``).
+
+    Returns:
+        The corresponding JSON schema type, or ``"string"`` if unknown.
+    """
     return _PYTHON_TO_JSON_TYPE.get(python_type_name, "string")
 
 
@@ -46,6 +71,18 @@ def _json_type(python_type_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 class Tool(BaseModel):
+    """A callable tool with an OpenAI-compatible function schema.
+
+    Created by the ``@tool`` decorator. Wraps a sync or async function
+    and generates the JSON schema from its signature.
+
+    Args:
+        func: The underlying Python function.
+        name: Tool name exposed to the LLM.
+        description: Tool description exposed to the LLM.
+        parameters_schema: JSON schema for the tool's parameters.
+    """
+
     model_config = {"arbitrary_types_allowed": True}
 
     func: Callable = Field(exclude=True)
@@ -65,9 +102,20 @@ class Tool(BaseModel):
         }
 
     def model_dump_json(self, **kwargs) -> str:
+        """Return the OpenAI function schema as a JSON string."""
         return json.dumps(self.model_dump())
 
     async def __call__(self, **kwargs) -> ToolCallResult:
+        """Execute the wrapped function and return a ToolCallResult.
+
+        Handles both sync and async functions transparently.
+
+        Args:
+            **kwargs: Arguments to pass to the underlying function.
+
+        Returns:
+            A ToolCallResult containing the tool name and output.
+        """
         if asyncio.iscoroutinefunction(self.func):
             result = await self.func(**kwargs)
         else:

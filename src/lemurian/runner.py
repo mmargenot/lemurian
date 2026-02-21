@@ -17,12 +17,31 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RunResult:
+    """The result of a single Runner.run() invocation.
+
+    Args:
+        last_message: The final message appended to the transcript.
+        agent_name: Name of the agent that was executed.
+        hand_off: Set if a tool returned a HandoffResult, None otherwise.
+    """
+
     last_message: Message
     agent_name: str
     hand_off: HandoffResult | None = None
 
 
 class Runner:
+    """Executes an agent's tool-calling loop.
+
+    The Runner is the only component that reads or writes the session
+    transcript. It injects the system prompt at call time (never storing
+    it in the transcript), dispatches tool calls, and detects handoffs.
+
+    Args:
+        max_turns: Maximum number of provider round-trips before
+            returning a timeout message.
+    """
+
     def __init__(self, max_turns: int = 50):
         self.max_turns = max_turns
 
@@ -33,6 +52,23 @@ class Runner:
         state: State,
         context_start: int = 0,
     ) -> RunResult:
+        """Run the agent loop until a final response or handoff.
+
+        Builds messages from ``session.transcript[context_start:]``
+        with the system prompt prepended. Executes tool calls,
+        appends results to the transcript, and returns when the
+        provider produces a text response or a tool triggers a handoff.
+
+        Args:
+            agent: The agent to execute.
+            session: The session containing the conversation transcript.
+            state: The application state passed to tools via Context.
+            context_start: Transcript index to start reading from.
+                Used by Swarm for fresh-context handoffs.
+
+        Returns:
+            A RunResult with the final message and optional handoff.
+        """
         ctx = Context(session=session, state=state, agent=agent)
         tool_schemas = [t.model_dump() for t in agent.tools]
 
