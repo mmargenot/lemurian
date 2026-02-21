@@ -141,9 +141,13 @@ class TestParseParamDescriptions:
             """
 
         descs = _parse_param_descriptions(func)
-        assert "query" in descs
-        assert "boolean operators" in descs["query"]
-        assert "wildcards" in descs["query"]
+        assert descs == {
+            "query": (
+                "The search query string.\n"
+                "Supports boolean operators\n"
+                "and wildcards."
+            ),
+        }
 
     def test_context_param_in_docstring_ignored_by_schema(self):
         """Documented context param doesn't leak into the schema."""
