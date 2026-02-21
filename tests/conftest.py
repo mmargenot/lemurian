@@ -75,6 +75,28 @@ def make_tool_call_response(
     return MockResponse(content=content, tool_calls=[tc])
 
 
+def make_multi_tool_call_response(
+    calls: list[tuple[str, dict, str]],
+    content: str | None = None,
+) -> MockResponse:
+    """Fake provider response containing multiple tool calls.
+
+    Each item in *calls* is ``(func_name, args_dict, call_id)``.
+    """
+    tool_calls = [
+        MockToolCall(
+            id=call_id,
+            type="function",
+            function=MockFunction(
+                name=name,
+                arguments=json.dumps(args),
+            ),
+        )
+        for name, args, call_id in calls
+    ]
+    return MockResponse(content=content, tool_calls=tool_calls)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

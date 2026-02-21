@@ -1,5 +1,7 @@
 import pytest
+from pydantic import BaseModel, Field
 
+from lemurian.agent import Agent
 from lemurian.context import Context
 from lemurian.message import MessageRole
 from lemurian.session import Session
@@ -188,6 +190,35 @@ class TestSwarmHandoff:
         )
 
     @pytest.mark.asyncio
+    async def test_handoff_to_nonexistent_agent(self):
+        """Handoff to an unregistered agent returns an error message."""
+        provider = MockProvider()
+        from lemurian.agent import Agent
+
+        a = Agent(
+            name="a", description="A",
+            system_prompt="A.", model="m", provider=provider,
+        )
+        b = Agent(
+            name="b", description="B",
+            system_prompt="B.", model="m", provider=provider,
+        )
+        swarm = Swarm(agents=[a, b])
+
+        # The LLM hallucinates a handoff to an agent that doesn't exist
+        provider.responses = [
+            make_tool_call_response(
+                "handoff",
+                {"agent_name": "ghost", "message": "go to ghost"},
+            ),
+        ]
+
+        result = await swarm.run("hello", agent="a")
+
+        assert "not found" in result.last_message.content
+        assert result.active_agent == "a"
+
+    @pytest.mark.asyncio
     async def test_max_handoffs_exceeded(self):
         provider = MockProvider()
         from lemurian.agent import Agent
@@ -244,8 +275,6 @@ class TestSwarmState:
             make_text_response("Counter is 1"),
         ]
 
-        from lemurian.agent import Agent
-
         agent = Agent(
             name="a", system_prompt="Count.", model="m",
             provider=provider, tools=[increment],
@@ -256,3 +285,152 @@ class TestSwarmState:
         await swarm.run("increment", agent="a")
 
         assert state.counter == 1
+
+
+# ---------------------------------------------------------------------------
+# State persistence across handoffs and turns
+# ---------------------------------------------------------------------------
+
+class TestSwarmStatePersistence:
+    @pytest.mark.asyncio
+    async def test_state_persists_across_handoffs(self):
+        """State mutated by agent A is visible to agent B after handoff."""
+
+        class SharedState(State):
+            notes: list[str] = Field(default_factory=list)
+
+        @tool
+        def add_note(context: Context, note: str):
+            """Adds a note to state."""
+            context.state.notes.append(note)
+            return f"Added: {note}"
+
+        @tool
+        def read_notes(context: Context):
+            """Read all notes from state."""
+            return f"Notes: {context.state.notes}"
+
+        provider = MockProvider()
+        writer = Agent(
+            name="writer", description="Writes notes",
+            system_prompt="Write.", model="m",
+            provider=provider, tools=[add_note],
+        )
+        reader = Agent(
+            name="reader", description="Reads notes",
+            system_prompt="Read.", model="m",
+            provider=provider, tools=[read_notes],
+        )
+        state = SharedState()
+        swarm = Swarm(agents=[writer, reader], state=state)
+
+        provider.responses = [
+            # Writer adds a note
+            make_tool_call_response(
+                "add_note", {"note": "hello"}, "call_1",
+            ),
+            # Writer hands off to reader
+            make_tool_call_response(
+                "handoff",
+                {
+                    "agent_name": "reader",
+                    "message": "Read the notes",
+                },
+            ),
+            # Reader reads notes
+            make_tool_call_response("read_notes", {}),
+            make_text_response("Done"),
+        ]
+
+        result = await swarm.run("Write and read", agent="writer")
+
+        assert result.active_agent == "reader"
+        assert state.notes == ["hello"]
+        # Reader's tool output should contain the note
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        read_result = [
+            r for r in tool_results
+            if "Notes:" in (r.content or "")
+        ]
+        assert len(read_result) == 1
+        assert "hello" in read_result[0].content
+
+    @pytest.mark.asyncio
+    async def test_nested_state_mutation(self):
+        """Nested Pydantic models in state can be mutated via tools."""
+
+        class Preferences(BaseModel):
+            theme: str = "light"
+            font_size: int = 12
+
+        class AppState(State):
+            prefs: Preferences = Field(
+                default_factory=Preferences
+            )
+
+        @tool
+        def set_theme(context: Context, theme: str):
+            """Update theme."""
+            context.state.prefs.theme = theme
+            return f"Theme set to {theme}"
+
+        provider = MockProvider()
+        agent = Agent(
+            name="a", system_prompt="Help.", model="m",
+            provider=provider, tools=[set_theme],
+        )
+        state = AppState()
+        swarm = Swarm(agents=[agent], state=state)
+
+        provider.responses = [
+            make_tool_call_response(
+                "set_theme", {"theme": "dark"},
+            ),
+            make_text_response("Done"),
+        ]
+
+        await swarm.run("Set dark mode", agent="a")
+
+        assert state.prefs.theme == "dark"
+        assert state.prefs.font_size == 12  # unchanged
+
+    @pytest.mark.asyncio
+    async def test_multiple_state_mutations_accumulate(self):
+        """Multiple tool calls across turns accumulate state changes."""
+
+        class CounterState(State):
+            counter: int = 0
+
+        @tool
+        def increment(context: Context):
+            """Increment counter."""
+            context.state.counter += 1
+            return str(context.state.counter)
+
+        provider = MockProvider()
+        agent = Agent(
+            name="a", system_prompt="Count.", model="m",
+            provider=provider, tools=[increment],
+        )
+        state = CounterState()
+        swarm = Swarm(agents=[agent], state=state)
+
+        # Turn 1: two increments
+        provider.responses = [
+            make_tool_call_response("increment", {}),
+            make_tool_call_response("increment", {}),
+            make_text_response("Counter is 2"),
+        ]
+        await swarm.run("Increment twice", agent="a")
+        assert state.counter == 2
+
+        # Turn 2: one more increment
+        provider.responses = [
+            make_tool_call_response("increment", {}),
+            make_text_response("Counter is 3"),
+        ]
+        await swarm.run("One more")
+        assert state.counter == 3

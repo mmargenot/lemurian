@@ -10,7 +10,7 @@ from lemurian.context import Context
 from lemurian.message import Message, MessageRole, ToolCallRequestMessage, ToolCallResultMessage
 from lemurian.session import Session
 from lemurian.state import State
-from lemurian.tools import HandoffResult
+from lemurian.tools import HandoffResult, LLMRecoverableError
 
 logger = logging.getLogger(__name__)
 
@@ -129,13 +129,53 @@ class Runner:
                     continue
 
                 # Parse arguments and inject context if needed
-                params = json.loads(tool_call.function.arguments)
+                # TODO: Add self-healing for malformed tool calls — use a
+                # secondary model to repair the JSON or re-map arguments
+                # before falling back to the error path.
+                try:
+                    params = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        f"Invalid JSON in arguments for {func_name}: {e}"
+                    )
+                    session.transcript.append(
+                        ToolCallResultMessage(
+                            role=MessageRole.TOOL,
+                            content=f"Error: invalid arguments — {e}",
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+
                 logger.info(f"Calling {func_name} with {params}")
 
                 if "context" in inspect.signature(tool_obj.func).parameters:
                     params["context"] = ctx
 
-                result = await tool_obj(**params)
+                try:
+                    result = await tool_obj(**params)
+                except LLMRecoverableError as e:
+                    logger.info(
+                        f"Tool {func_name} requested retry: {e}"
+                    )
+                    session.transcript.append(
+                        ToolCallResultMessage(
+                            role=MessageRole.TOOL,
+                            content=str(e),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
+                except Exception as e:
+                    logger.error(f"Tool {func_name} raised: {e}")
+                    session.transcript.append(
+                        ToolCallResultMessage(
+                            role=MessageRole.TOOL,
+                            content=f"Error calling {func_name}: {e}",
+                            tool_call_id=call_id,
+                        )
+                    )
+                    continue
 
                 # Check for handoff
                 if isinstance(result.output, HandoffResult):
