@@ -3,16 +3,8 @@ from openai import AsyncOpenAI
 import os
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s:%(name)s:%(levelname)s:%(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler('lemurian.log'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class ModelProvider:
@@ -205,7 +197,7 @@ class ModalVLLMProvider(ModelProvider):
     """Provider for vLLM deployed on Modal.
 
     Connects to a vLLM instance hosted on Modal's serverless
-    infrastructure. Deploy with ``modal deploy src/scripts/modal_vllm.py``.
+    infrastructure. Deploy with ``modal deploy examples/modal_vllm.py``.
 
     Args:
         endpoint_url: The Modal deployment URL

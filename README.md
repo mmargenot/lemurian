@@ -185,7 +185,7 @@ Deploy vLLM to [Modal](https://modal.com) for serverless GPU inference:
 ```bash
 uv sync --group modal
 modal setup
-modal deploy src/scripts/modal_vllm.py
+modal deploy examples/modal_vllm.py
 ```
 
 ```python
@@ -207,7 +207,7 @@ Customize deployments with environment variables:
 
 Pre-download model weights for faster cold starts:
 ```bash
-modal run src/scripts/modal_vllm.py --download
+modal run examples/modal_vllm.py --download
 ```
 
 ## Testing
