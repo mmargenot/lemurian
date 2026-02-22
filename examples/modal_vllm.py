@@ -6,13 +6,13 @@ OpenAI-compatible API that can be used with ModalVLLMProvider.
 
 Usage:
     # Deploy the vLLM server to Modal
-    modal deploy src/scripts/modal_vllm.py
+    modal deploy examples/modal_vllm.py
 
     # For development/testing (runs temporarily)
-    modal serve src/scripts/modal_vllm.py
+    modal serve examples/modal_vllm.py
 
     # Run with a different model
-    MODEL_ID="meta-llama/Llama-3.1-8B-Instruct" modal deploy src/scripts/modal_vllm.py
+    MODEL_ID="meta-llama/Llama-3.1-8B-Instruct" modal deploy examples/modal_vllm.py
 
 Environment Variables:
     MODEL_ID: HuggingFace model ID to serve (default: Qwen/Qwen3-8B)
