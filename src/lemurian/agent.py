@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from lemurian.capability import Capability
 from lemurian.provider import ModelProvider
 from lemurian.tools import Tool
 
@@ -17,6 +18,8 @@ class Agent(BaseModel):
             to help the LLM choose which agent to hand off to.
         system_prompt: System prompt injected by the Runner at call time.
         tools: List of Tool objects available to this agent.
+        capabilities: List of Capability instances whose tools are
+            merged into this agent's tool registry at resolution time.
         model: Model identifier passed to the provider.
         provider: The model provider used for completions.
     """
@@ -27,10 +30,18 @@ class Agent(BaseModel):
     description: str = ""
     system_prompt: str
     tools: list[Tool] = Field(default_factory=list)
+    capabilities: list[Capability] = Field(default_factory=list)
     model: str
     provider: ModelProvider
 
     @property
     def tool_registry(self) -> dict[str, Tool]:
-        """Return a mapping of tool names to Tool objects."""
-        return {t.name: t for t in self.tools}
+        """Return a mapping of tool names to Tool objects.
+
+        Includes tools from both ``tools`` and ``capabilities``.
+        """
+        registry = {t.name: t for t in self.tools}
+        for cap in self.capabilities:
+            for t in cap.tools():
+                registry[t.name] = t
+        return registry

@@ -7,8 +7,8 @@ Demonstrates:
 - Running an interactive loop with Runner
 
 Usage:
-    export OPENAI_API_KEY="sk-..."
-    python examples/agent.py
+    Add OPENAI_API_KEY=sk-... to .env, then:
+    uv run --env-file=.env examples/agent.py
 """
 
 import asyncio
