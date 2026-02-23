@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 import logging
 import uuid
 from dataclasses import dataclass
 
 from lemurian.agent import Agent
+from lemurian.capability import Capability
 from lemurian.context import Context
 from lemurian.message import Message, MessageRole
 from lemurian.runner import Runner
@@ -64,6 +63,9 @@ class Swarm:
         self.active_agent_name: str | None = None
         self.context_start: int = 0
 
+        self._capabilities: dict[str, Capability] = {}
+        self._agent_capabilities: dict[str, set[str]] = {}
+
     def _create_handoff_tool(self, current_agent_name: str) -> Tool:
         """Create a handoff tool excluding the current agent from the enum.
 
@@ -109,11 +111,79 @@ class Swarm:
             },
         )
 
-    def _augment_agent(self, agent: Agent, handoff_tool: Tool) -> Agent:
-        """Return a shallow copy of *agent* with the handoff tool appended."""
-        augmented = agent.model_copy()
-        augmented.tools = list(agent.tools) + [handoff_tool]
-        return augmented
+    def add_capability(
+        self,
+        capability: Capability,
+        agents: list[str] | None = None,
+    ) -> None:
+        """Register a capability and assign it to agents.
+
+        Args:
+            capability: The capability to add.
+            agents: Agent names to receive this capability.  When
+                ``None``, the capability is assigned to every agent
+                currently in the swarm.
+
+        Raises:
+            ValueError: If any name in *agents* is not a registered agent.
+        """
+        targets = agents if agents is not None else list(self.agents.keys())
+        for name in targets:
+            if name not in self.agents:
+                raise ValueError(f"Agent '{name}' not found in swarm")
+
+        self._capabilities[capability.name] = capability
+        for name in targets:
+            self._agent_capabilities.setdefault(name, set()).add(capability.name)
+            capability.on_attach(self.state)
+
+    def remove_capability(self, capability_name: str) -> None:
+        """Remove a capability from the swarm and all agent assignments.
+
+        Args:
+            capability_name: Name of the capability to remove.
+
+        Raises:
+            KeyError: If the capability is not registered.
+        """
+        cap = self._capabilities.pop(capability_name)
+        cap.on_detach(self.state)
+        for agent_caps in self._agent_capabilities.values():
+            agent_caps.discard(capability_name)
+
+    def _resolve_agent(self, agent: Agent) -> Agent:
+        """Return a copy of *agent* with all tools resolved.
+
+        Merges the agent's own tool registry (which includes agent-level
+        capability tools), swarm-level capability tools assigned to this
+        agent, and the handoff tool (when multiple agents exist).
+
+        Raises:
+            ValueError: If any two tools share the same name.
+        """
+        resolved = agent.model_copy()
+
+        # Start from the agent's full tool registry (own tools + agent-level capabilities)
+        all_tools = list(agent.tool_registry.values())
+
+        # Add swarm-level capability tools assigned to this agent
+        for cap_name in self._agent_capabilities.get(agent.name, set()):
+            all_tools.extend(self._capabilities[cap_name].tools())
+
+        # Add handoff tool if multiple agents
+        if len(self.agents) > 1:
+            all_tools.append(self._create_handoff_tool(agent.name))
+
+        # Validate uniqueness
+        seen: set[str] = set()
+        for t in all_tools:
+            if t.name in seen:
+                raise ValueError(f"Duplicate tool name: '{t.name}'")
+            seen.add(t.name)
+
+        resolved.tools = all_tools
+        resolved.capabilities = []  # prevent double-counting in tool_registry
+        return resolved
 
     async def run(self, user_message: str, agent: str | None = None) -> SwarmResult:
         """Append a user message and run the agent loop.
@@ -152,16 +222,10 @@ class Swarm:
         # Handoff loop
         for _ in range(self.max_handoffs + 1):
             current_agent = self.agents[self.active_agent_name]
-
-            # Only create handoff tool if there are multiple agents
-            if len(self.agents) > 1:
-                handoff_tool = self._create_handoff_tool(self.active_agent_name)
-                augmented_agent = self._augment_agent(current_agent, handoff_tool)
-            else:
-                augmented_agent = current_agent
+            resolved_agent = self._resolve_agent(current_agent)
 
             result = await self.runner.run(
-                agent=augmented_agent,
+                agent=resolved_agent,
                 session=self.session,
                 state=self.state,
                 context_start=self.context_start,

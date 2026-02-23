@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import inspect
 import json
 import logging
@@ -70,7 +68,8 @@ class Runner:
             A RunResult with the final message and optional handoff.
         """
         ctx = Context(session=session, state=state, agent=agent)
-        tool_schemas = [t.model_dump() for t in agent.tools]
+        tool_registry = agent.tool_registry
+        tool_schemas = [t.model_dump() for t in tool_registry.values()]
 
         for _ in range(self.max_turns):
             # Build messages: system prompt + transcript window
@@ -115,8 +114,8 @@ class Runner:
                 func_name = tool_call.function.name
                 call_id = tool_call.id
 
-                # Look up in agent's tool registry
-                tool_obj = agent.tool_registry.get(func_name)
+                # Look up in resolved tool registry
+                tool_obj = tool_registry.get(func_name)
                 if tool_obj is None:
                     logger.warning(f"Tool not found: {func_name}")
                     session.transcript.append(
