@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from lemurian.agent import Agent
 from lemurian.context import Context
 from lemurian.message import Message, MessageRole, ToolCallResultMessage
 from lemurian.runner import Runner
@@ -10,6 +11,7 @@ from lemurian.state import State
 from lemurian.tools import HandoffResult, LLMRecoverableError, tool
 
 from tests.conftest import (
+    MockCapability,
     MockFunction,
     MockResponse,
     MockToolCall,
@@ -475,3 +477,61 @@ class TestRunnerMultiToolCall:
         assert result.hand_off.target_agent == "billing"
         assert "handoff" in call_log
         assert "should_not_run" not in call_log
+
+
+# ---------------------------------------------------------------------------
+# Runner with capability tools (standalone, no Swarm)
+# ---------------------------------------------------------------------------
+
+class TestRunnerCapabilityTools:
+    @pytest.mark.asyncio
+    async def test_runner_dispatches_capability_tool(self, mock_provider):
+        @tool
+        def raven():
+            """Recite the Raven."""
+            return "Quoth the Raven, 'Nevermore.'"
+
+        cap = MockCapability(name="raven", tool_list=[raven])
+        agent = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="mock-model", provider=mock_provider,
+            capabilities=[cap],
+        )
+        mock_provider.responses = [
+            make_tool_call_response("raven", {}),
+            make_text_response("Darkness there and nothing more"),
+        ]
+        session = Session(session_id="s1")
+
+        result = await Runner().run(agent, session, State())
+
+        assert result.last_message.content == "Darkness there and nothing more"
+        tool_result = [
+            m for m in session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert "Nevermore" in tool_result[0].content
+
+    @pytest.mark.asyncio
+    async def test_runner_sends_capability_tool_schema(self, mock_provider):
+        @tool
+        def raven():
+            """Recite the Raven."""
+            return "Quoth the Raven, 'Nevermore.'"
+
+        cap = MockCapability(name="raven", tool_list=[raven])
+        agent = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="mock-model", provider=mock_provider,
+            capabilities=[cap],
+        )
+        mock_provider.responses = [make_text_response("Darkness there and nothing more")]
+        session = Session(session_id="s1")
+
+        await Runner().run(agent, session, State())
+
+        sent_tools = mock_provider.call_log[0]["tools"]
+        tool_names = [t["function"]["name"] for t in sent_tools]
+        assert "raven" in tool_names

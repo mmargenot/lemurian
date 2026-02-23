@@ -2,6 +2,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from lemurian.agent import Agent
+from lemurian.capability import Capability
 from lemurian.context import Context
 from lemurian.message import MessageRole
 from lemurian.session import Session
@@ -10,6 +11,7 @@ from lemurian.swarm import Swarm
 from lemurian.tools import tool
 
 from tests.conftest import (
+    MockCapability,
     MockProvider,
     make_text_response,
     make_tool_call_response,
@@ -126,15 +128,14 @@ class TestHandoffTool:
         assert "billing" in enum
         assert "support" in enum
 
-    def test_augment_agent_independent_copy(self, make_agent):
+    def test_resolve_agent_independent_copy(self, make_agent):
         a = make_agent(name="a")
         b = make_agent(name="b")
         swarm = Swarm(agents=[a, b])
 
-        ht = swarm._create_handoff_tool("a")
-        augmented = swarm._augment_agent(a, ht)
+        resolved = swarm._resolve_agent(a)
 
-        assert len(augmented.tools) == 1  # handoff tool
+        assert len(resolved.tools) == 1  # handoff tool
         assert len(a.tools) == 0  # original unchanged
 
 
@@ -434,3 +435,708 @@ class TestSwarmStatePersistence:
         ]
         await swarm.run("One more")
         assert state.counter == 3
+
+
+# ---------------------------------------------------------------------------
+# Swarm.add_capability
+# ---------------------------------------------------------------------------
+
+class TestSwarmAddCapability:
+    def test_add_capability_to_all_agents(
+        self, make_agent, cap_tool_raven
+    ):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        swarm.add_capability(cap)
+        resolved_montresor = swarm._resolve_agent(montresor)
+        resolved_usher = swarm._resolve_agent(usher)
+        assert any(t.name == "raven" for t in resolved_montresor.tools)
+        assert any(t.name == "raven" for t in resolved_usher.tools)
+
+    def test_add_capability_to_specific_agents(
+        self, make_agent, cap_tool_annabel
+    ):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        cap = MockCapability(name="annabel_lee", tool_list=[cap_tool_annabel])
+        swarm.add_capability(cap, agents=["montresor"])
+        resolved_montresor = swarm._resolve_agent(montresor)
+        resolved_usher = swarm._resolve_agent(usher)
+        montresor_tools = [t.name for t in resolved_montresor.tools]
+        usher_tools = [t.name for t in resolved_usher.tools]
+        assert "annabel" in montresor_tools
+        assert "annabel" not in usher_tools
+
+    def test_on_attach_called_per_agent(self, make_agent):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        state = State()
+        swarm = Swarm(agents=[montresor, usher], state=state)
+        cap = MockCapability(name="raven")
+        swarm.add_capability(cap)
+        assert len(cap.attach_log) == 2
+        assert all(s is state for s in cap.attach_log)
+
+    def test_invalid_agent_raises(self, make_agent):
+        swarm = Swarm(agents=[make_agent(name="montresor")])
+        cap = MockCapability(name="raven")
+        with pytest.raises(ValueError, match="fortunato"):
+            swarm.add_capability(cap, agents=["fortunato"])
+
+    def test_add_multiple_capabilities_to_swarm(
+        self, make_agent, cap_tool_raven, cap_tool_annabel
+    ):
+        montresor = make_agent(name="montresor")
+        swarm = Swarm(agents=[montresor])
+        raven_cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        annabel_cap = MockCapability(name="annabel_lee", tool_list=[cap_tool_annabel])
+        swarm.add_capability(raven_cap)
+        swarm.add_capability(annabel_cap)
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+        assert "annabel" in tool_names
+
+    def test_add_different_capabilities_to_different_agents(
+        self, make_agent, cap_tool_raven, cap_tool_annabel
+    ):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        raven_cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        annabel_cap = MockCapability(name="annabel_lee", tool_list=[cap_tool_annabel])
+        swarm.add_capability(raven_cap, agents=["montresor"])
+        swarm.add_capability(annabel_cap, agents=["usher"])
+        montresor_tools = [t.name for t in swarm._resolve_agent(montresor).tools]
+        usher_tools = [t.name for t in swarm._resolve_agent(usher).tools]
+        assert "raven" in montresor_tools
+        assert "annabel" not in montresor_tools
+        assert "annabel" in usher_tools
+        assert "raven" not in usher_tools
+
+
+# ---------------------------------------------------------------------------
+# Swarm.remove_capability
+# ---------------------------------------------------------------------------
+
+class TestSwarmRemoveCapability:
+    def test_on_detach_called_once(self, make_agent):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        state = State()
+        swarm = Swarm(agents=[montresor, usher], state=state)
+        cap = MockCapability(name="raven")
+        swarm.add_capability(cap)
+        swarm.remove_capability("raven")
+        assert len(cap.detach_log) == 1
+        assert cap.detach_log[0] is state
+
+    def test_removed_cap_tools_not_in_resolved_agent(
+        self, make_agent, cap_tool_raven
+    ):
+        montresor = make_agent(name="montresor")
+        swarm = Swarm(agents=[montresor])
+        cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        swarm.add_capability(cap)
+        swarm.remove_capability("raven")
+        resolved = swarm._resolve_agent(montresor)
+        assert all(t.name != "raven" for t in resolved.tools)
+
+    def test_remove_nonexistent_raises_keyerror(self, make_agent):
+        swarm = Swarm(agents=[make_agent(name="montresor")])
+        with pytest.raises(KeyError):
+            swarm.remove_capability("black_cat")
+
+
+# ---------------------------------------------------------------------------
+# Swarm._resolve_agent — capability placement combinations
+# ---------------------------------------------------------------------------
+
+class TestSwarmResolveCapabilities:
+    def test_resolve_swarm_caps_only(
+        self, make_agent, cap_tool_raven, cap_tool_annabel
+    ):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(
+            MockCapability(name="raven", tool_list=[cap_tool_raven]),
+            agents=["montresor"],
+        )
+        swarm.add_capability(
+            MockCapability(name="annabel_lee", tool_list=[cap_tool_annabel]),
+            agents=["montresor"],
+        )
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+        assert "annabel" in tool_names
+
+    def test_resolve_agent_caps_only(
+        self, make_agent, cap_tool_raven, cap_tool_annabel
+    ):
+        raven_cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        annabel_cap = MockCapability(name="annabel_lee", tool_list=[cap_tool_annabel])
+        montresor = make_agent(name="montresor", capabilities=[raven_cap, annabel_cap])
+        swarm = Swarm(agents=[montresor])
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+        assert "annabel" in tool_names
+
+    def test_resolve_swarm_cap_with_agent_tools(
+        self, make_agent, sample_tool, cap_tool_raven
+    ):
+        montresor = make_agent(name="montresor", tools=[sample_tool])
+        swarm = Swarm(agents=[montresor])
+        swarm.add_capability(
+            MockCapability(name="raven", tool_list=[cap_tool_raven]),
+        )
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "greet" in tool_names
+        assert "raven" in tool_names
+
+    def test_resolve_agent_cap_with_agent_tools(
+        self, make_agent, sample_tool, cap_tool_raven
+    ):
+        raven_cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        montresor = make_agent(
+            name="montresor", tools=[sample_tool], capabilities=[raven_cap],
+        )
+        swarm = Swarm(agents=[montresor])
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "greet" in tool_names
+        assert "raven" in tool_names
+
+    def test_resolve_both_level_caps_with_agent_tools(
+        self, make_agent, sample_tool, cap_tool_raven, cap_tool_annabel
+    ):
+        raven_cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        annabel_cap = MockCapability(name="annabel_lee", tool_list=[cap_tool_annabel])
+        montresor = make_agent(
+            name="montresor", tools=[sample_tool], capabilities=[raven_cap],
+        )
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(annabel_cap, agents=["montresor"])
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "greet" in tool_names
+        assert "raven" in tool_names
+        assert "annabel" in tool_names
+        assert "handoff" in tool_names
+
+    def test_resolve_multiple_swarm_caps_on_same_agent(
+        self, make_agent, cap_tool_raven, cap_tool_lenore
+    ):
+        montresor = make_agent(name="montresor")
+        swarm = Swarm(agents=[montresor])
+        swarm.add_capability(
+            MockCapability(name="raven", tool_list=[cap_tool_raven]),
+        )
+        swarm.add_capability(
+            MockCapability(name="lenore", tool_list=[cap_tool_lenore]),
+        )
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+        assert "lenore" in tool_names
+
+    def test_resolve_caps_on_swarm_but_not_agent(
+        self, make_agent, cap_tool_raven
+    ):
+        montresor = make_agent(name="montresor")
+        swarm = Swarm(agents=[montresor])
+        swarm.add_capability(
+            MockCapability(name="raven", tool_list=[cap_tool_raven]),
+        )
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+
+    def test_resolve_does_not_mutate_original(
+        self, make_agent, cap_tool_raven
+    ):
+        raven_cap = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        montresor = make_agent(name="montresor", capabilities=[raven_cap])
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm._resolve_agent(montresor)
+        assert len(montresor.tools) == 0
+        assert len(montresor.capabilities) == 1
+
+    def test_resolve_single_agent_no_handoff_with_caps(
+        self, make_agent, cap_tool_raven
+    ):
+        montresor = make_agent(name="montresor")
+        swarm = Swarm(agents=[montresor])
+        swarm.add_capability(
+            MockCapability(name="raven", tool_list=[cap_tool_raven]),
+        )
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+        assert "handoff" not in tool_names
+
+    def test_resolve_multi_agent_includes_handoff_with_caps(
+        self, make_agent, cap_tool_raven
+    ):
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(
+            MockCapability(name="raven", tool_list=[cap_tool_raven]),
+            agents=["montresor"],
+        )
+        resolved = swarm._resolve_agent(montresor)
+        tool_names = [t.name for t in resolved.tools]
+        assert "raven" in tool_names
+        assert "handoff" in tool_names
+
+    def test_resolve_duplicate_cap_on_agent_and_swarm_raises(
+        self, make_agent, cap_tool_raven
+    ):
+        """Same raven tool on both agent.capabilities and swarm level."""
+        raven_cap = MockCapability(name="raven_agent", tool_list=[cap_tool_raven])
+        raven_swarm = MockCapability(name="raven_swarm", tool_list=[cap_tool_raven])
+        montresor = make_agent(name="montresor", capabilities=[raven_cap])
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(raven_swarm, agents=["montresor"])
+        with pytest.raises(ValueError, match="Duplicate tool name"):
+            swarm._resolve_agent(montresor)
+
+
+# ---------------------------------------------------------------------------
+# Swarm._resolve_agent — duplicate tool detection
+# ---------------------------------------------------------------------------
+
+class TestSwarmResolveDuplicateDetection:
+    def test_duplicate_agent_tool_vs_swarm_cap(
+        self, make_agent, sample_tool
+    ):
+        """Agent has 'greet' tool; swarm cap also provides 'greet'."""
+        @tool
+        def greet():
+            """Quoth the Raven."""
+            return "Quoth the Raven, 'Nevermore.'"
+        cap = MockCapability(name="raven", tool_list=[greet])
+        montresor = make_agent(name="montresor", tools=[sample_tool])
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(cap, agents=["montresor"])
+        with pytest.raises(ValueError, match="Duplicate tool name"):
+            swarm._resolve_agent(montresor)
+
+    def test_duplicate_agent_cap_vs_swarm_cap(
+        self, make_agent, cap_tool_raven
+    ):
+        """Agent-level and swarm-level capabilities both provide 'raven'."""
+        agent_cap = MockCapability(name="raven_agent", tool_list=[cap_tool_raven])
+        swarm_cap = MockCapability(name="tell_tale_heart", tool_list=[cap_tool_raven])
+        montresor = make_agent(name="montresor", capabilities=[agent_cap])
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(swarm_cap, agents=["montresor"])
+        with pytest.raises(ValueError, match="Duplicate tool name"):
+            swarm._resolve_agent(montresor)
+
+    def test_duplicate_between_two_swarm_caps(
+        self, make_agent, cap_tool_raven
+    ):
+        """Two swarm caps both provide the same tool name."""
+        cap1 = MockCapability(name="raven", tool_list=[cap_tool_raven])
+        cap2 = MockCapability(name="tell_tale_heart", tool_list=[cap_tool_raven])
+        montresor = make_agent(name="montresor")
+        swarm = Swarm(agents=[montresor])
+        swarm.add_capability(cap1)
+        swarm.add_capability(cap2)
+        with pytest.raises(ValueError, match="Duplicate tool name"):
+            swarm._resolve_agent(montresor)
+
+    def test_cap_tool_named_handoff_collides(self, make_agent):
+        """A capability tool named 'handoff' collides with the
+        injected handoff tool in a multi-agent swarm."""
+        @tool
+        def handoff():
+            """In pace requiescat!"""
+            return "The thousand injuries of Fortunato I had borne"
+        cap = MockCapability(name="black_cat", tool_list=[handoff])
+        montresor = make_agent(name="montresor")
+        usher = make_agent(name="usher")
+        swarm = Swarm(agents=[montresor, usher])
+        swarm.add_capability(cap, agents=["montresor"])
+        with pytest.raises(ValueError, match="Duplicate tool name"):
+            swarm._resolve_agent(montresor)
+
+
+# ---------------------------------------------------------------------------
+# Swarm capability end-to-end
+# ---------------------------------------------------------------------------
+
+class TestSwarmCapabilityEndToEnd:
+    @pytest.mark.asyncio
+    async def test_swarm_cap_tool_dispatched(self):
+        @tool
+        def raven():
+            """Recite the Raven."""
+            return "Quoth the Raven, 'Nevermore.'"
+
+        provider = MockProvider()
+        provider.responses = [
+            make_tool_call_response("raven", {}),
+            make_text_response("Darkness there and nothing more"),
+        ]
+        montresor = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="m", provider=provider,
+        )
+        swarm = Swarm(agents=[montresor])
+        cap = MockCapability(name="raven", tool_list=[raven])
+        swarm.add_capability(cap)
+
+        result = await swarm.run("Tell me a tale", agent="montresor")
+
+        assert result.last_message.content == "Darkness there and nothing more"
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert any("Nevermore" in r.content for r in tool_results)
+
+    @pytest.mark.asyncio
+    async def test_agent_cap_tool_dispatched_through_swarm(self):
+        @tool
+        def annabel():
+            """Recite Annabel Lee."""
+            return "It was many and many a year ago, in a kingdom by the sea"
+
+        provider = MockProvider()
+        provider.responses = [
+            make_tool_call_response("annabel", {}),
+            make_text_response("A wind blew out of a cloud, chilling my beautiful Annabel Lee"),
+        ]
+        cap = MockCapability(name="annabel_lee", tool_list=[annabel])
+        prospero = Agent(
+            name="prospero",
+            description="The Red Death had long devastated the country",
+            system_prompt="Deep into that darkness peering.",
+            model="m", provider=provider, capabilities=[cap],
+        )
+        swarm = Swarm(agents=[prospero])
+
+        result = await swarm.run("Tell me a tale", agent="prospero")
+
+        assert "Annabel Lee" in result.last_message.content
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert any("kingdom by the sea" in r.content for r in tool_results)
+
+    @pytest.mark.asyncio
+    async def test_both_level_caps_dispatched(self):
+        @tool
+        def raven():
+            """Recite the Raven."""
+            return "Quoth the Raven, 'Nevermore.'"
+
+        @tool
+        def annabel():
+            """Recite Annabel Lee."""
+            return "It was many and many a year ago, in a kingdom by the sea"
+
+        provider = MockProvider()
+        provider.responses = [
+            make_tool_call_response("raven", {}),
+            make_tool_call_response("annabel", {}),
+            make_text_response("Darkness there and nothing more"),
+        ]
+        agent_cap = MockCapability(name="raven", tool_list=[raven])
+        montresor = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="m", provider=provider, capabilities=[agent_cap],
+        )
+        swarm = Swarm(agents=[montresor])
+        swarm_cap = MockCapability(name="annabel_lee", tool_list=[annabel])
+        swarm.add_capability(swarm_cap)
+
+        result = await swarm.run("Tell me a tale of terror", agent="montresor")
+
+        assert result.last_message.content == "Darkness there and nothing more"
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        contents = [r.content for r in tool_results]
+        assert any("Nevermore" in c for c in contents)
+        assert any("kingdom by the sea" in c for c in contents)
+
+    @pytest.mark.asyncio
+    async def test_removed_cap_tools_not_sent(self):
+        @tool
+        def raven():
+            """Recite the Raven."""
+            return "Quoth the Raven, 'Nevermore.'"
+
+        provider = MockProvider()
+        montresor = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="m", provider=provider,
+        )
+        swarm = Swarm(agents=[montresor])
+        cap = MockCapability(name="raven", tool_list=[raven])
+        swarm.add_capability(cap)
+        swarm.remove_capability("raven")
+
+        provider.responses = [make_text_response("Darkness there and nothing more")]
+        await swarm.run("Tell me a tale", agent="montresor")
+
+        sent_tools = provider.call_log[0]["tools"]
+        assert sent_tools is None
+
+    @pytest.mark.asyncio
+    async def test_capability_tool_receives_context(self):
+        @tool
+        def who_am_i(context: Context, verse: str):
+            """Report the agent's name."""
+            return f"agent={context.agent.name}"
+
+        provider = MockProvider()
+        provider.responses = [
+            make_tool_call_response(
+                "who_am_i",
+                {"verse": "Is all that we see or seem but a dream within a dream?"},
+            ),
+            make_text_response("Darkness there and nothing more"),
+        ]
+        cap = MockCapability(name="tell_tale_heart", tool_list=[who_am_i])
+        montresor = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="m", provider=provider, capabilities=[cap],
+        )
+        swarm = Swarm(agents=[montresor])
+
+        await swarm.run("Who are you?", agent="montresor")
+
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert any("agent=montresor" in r.content for r in tool_results)
+
+
+# ---------------------------------------------------------------------------
+# Capability state integration (bookshop example patterns)
+# ---------------------------------------------------------------------------
+
+class TestSwarmCapabilityStateIntegration:
+    """Tests that validate capability state patterns: self-contained
+    agent-level tools, app-level state init for cross-capability sharing,
+    and state mutation via swarm-level tools."""
+
+    @pytest.mark.asyncio
+    async def test_agent_level_cap_tools_self_contained(self):
+        """Agent-level capability tools work via closures without on_attach."""
+        catalog = {"isbn-1": {"title": "The Raven", "author": "Poe"}}
+
+        class SelfContainedCap(Capability):
+            def __init__(self):
+                super().__init__("library")
+                self._catalog = catalog
+
+            def tools(self):
+                data = self._catalog
+
+                @tool
+                def lookup(isbn: str):
+                    """Look up a book."""
+                    return data.get(isbn, "Not found")
+
+                return [lookup]
+
+        provider = MockProvider()
+        provider.responses = [
+            make_tool_call_response("lookup", {"isbn": "isbn-1"}),
+            make_text_response("Found it"),
+        ]
+        agent = Agent(
+            name="montresor",
+            system_prompt="Deep into that darkness peering.",
+            model="m", provider=provider,
+            capabilities=[SelfContainedCap()],
+        )
+        swarm = Swarm(agents=[agent])
+
+        await swarm.run("Find The Raven", agent="montresor")
+
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert any("The Raven" in r.content for r in tool_results)
+
+    @pytest.mark.asyncio
+    async def test_agent_level_cap_on_attach_not_called(self):
+        """Swarm.__init__ does NOT call on_attach for agent-level caps."""
+        cap = MockCapability(name="raven")
+        agent = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="m", provider=MockProvider(),
+            capabilities=[cap],
+        )
+        Swarm(agents=[agent])
+
+        assert len(cap.attach_log) == 0
+
+    @pytest.mark.asyncio
+    async def test_swarm_level_on_attach_populates_state(self):
+        """Swarm-level on_attach writes to state; another agent reads it."""
+
+        class ShopState(State):
+            catalog: dict[str, str] = {}
+
+        class CatalogCap(Capability):
+            def __init__(self):
+                super().__init__("catalog")
+
+            def tools(self):
+                return []
+
+            def on_attach(self, state):
+                if isinstance(state, ShopState):
+                    state.catalog["isbn-1"] = "The Raven"
+
+        @tool
+        def read_catalog(context: Context):
+            """Read from shared catalog."""
+            return f"catalog={context.state.catalog}"
+
+        provider = MockProvider()
+        provider.responses = [
+            make_tool_call_response("read_catalog", {}),
+            make_text_response("Done"),
+        ]
+        reader = Agent(
+            name="usher",
+            system_prompt="The Fall of the House of Usher.",
+            model="m", provider=provider, tools=[read_catalog],
+        )
+        state = ShopState()
+        swarm = Swarm(agents=[reader], state=state)
+        swarm.add_capability(CatalogCap())
+
+        assert state.catalog == {"isbn-1": "The Raven"}
+
+        await swarm.run("What's in the catalog?", agent="usher")
+
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert any("The Raven" in r.content for r in tool_results)
+
+    @pytest.mark.asyncio
+    async def test_cross_capability_state_sharing_via_handoff(self):
+        """Agent A mutates state via a tool, hands off to Agent B whose
+        tool reads the mutated state — the bookshop pattern."""
+
+        class SharedState(State):
+            catalog: dict[str, str] = {}
+
+        @tool
+        def add_book(context: Context, isbn: str, title: str):
+            """Add a book to the shared catalog."""
+            context.state.catalog[isbn] = title
+            return f"Added '{title}'"
+
+        @tool
+        def read_catalog(context: Context):
+            """Read the shared catalog."""
+            return f"catalog={context.state.catalog}"
+
+        provider = MockProvider()
+        writer = Agent(
+            name="montresor", description="Adds books",
+            system_prompt="For the love of God, Montresor!",
+            model="m", provider=provider, tools=[add_book],
+        )
+        reader = Agent(
+            name="usher", description="Reads catalog",
+            system_prompt="The Fall of the House of Usher.",
+            model="m", provider=provider, tools=[read_catalog],
+        )
+        state = SharedState()
+        swarm = Swarm(agents=[writer, reader], state=state)
+
+        provider.responses = [
+            # Writer adds a book
+            make_tool_call_response(
+                "add_book",
+                {"isbn": "isbn-1", "title": "The Raven"},
+            ),
+            # Writer hands off to reader
+            make_tool_call_response(
+                "handoff",
+                {"agent_name": "usher", "message": "Check the catalog"},
+            ),
+            # Reader reads catalog
+            make_tool_call_response("read_catalog", {}),
+            make_text_response("I see The Raven"),
+        ]
+
+        result = await swarm.run("Add and check", agent="montresor")
+
+        assert result.active_agent == "usher"
+        assert state.catalog == {"isbn-1": "The Raven"}
+        tool_results = [
+            m for m in swarm.session.transcript
+            if m.role == MessageRole.TOOL
+        ]
+        assert any("The Raven" in r.content for r in tool_results)
+
+    @pytest.mark.asyncio
+    async def test_swarm_cap_mutates_state_visible_to_agent_cap(self):
+        """A swarm-level capability tool writes to shared state, and an
+        agent-level capability tool (via closure over state) can observe
+        the change on a subsequent turn."""
+
+        class InventoryState(State):
+            orders: list[str] = []
+
+        @tool
+        def place_order(context: Context, title: str):
+            """Place an order (swarm-level cap)."""
+            context.state.orders.append(title)
+            return f"Ordered '{title}'"
+
+        provider = MockProvider()
+        order_cap = MockCapability(name="ordering", tool_list=[place_order])
+
+        agent = Agent(
+            name="montresor",
+            system_prompt="Once upon a midnight dreary.",
+            model="m", provider=provider,
+        )
+        state = InventoryState()
+        swarm = Swarm(agents=[agent], state=state)
+        swarm.add_capability(order_cap)
+
+        provider.responses = [
+            make_tool_call_response("place_order", {"title": "The Raven"}),
+            make_text_response("Order placed"),
+        ]
+
+        await swarm.run("Order The Raven", agent="montresor")
+
+        assert state.orders == ["The Raven"]
