@@ -5,10 +5,16 @@ from dataclasses import dataclass
 
 from lemurian.agent import Agent
 from lemurian.context import Context
-from lemurian.message import Message, MessageRole, ToolCallRequestMessage, ToolCallResultMessage
+from lemurian.handoff import Handoff, HandoffResult
+from lemurian.message import (
+    Message,
+    MessageRole,
+    ToolCallRequestMessage,
+    ToolCallResultMessage,
+)
 from lemurian.session import Session
 from lemurian.state import State
-from lemurian.tools import HandoffResult, LLMRecoverableError
+from lemurian.tools import LLMRecoverableError
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +26,8 @@ class RunResult:
     Args:
         last_message: The final message appended to the transcript.
         agent_name: Name of the agent that was executed.
-        hand_off: Set if a tool returned a HandoffResult, None otherwise.
+        hand_off: Set when the model called a handoff tool,
+            ``None`` otherwise.
     """
 
     last_message: Message
@@ -34,7 +41,7 @@ class Runner:
     The Runner reads the session transcript and appends assistant
     responses, tool-call requests, and tool results during its loop.
     It injects the system prompt at call time (never storing it in
-    the transcript), dispatches tool calls, and detects handoffs.
+    the transcript), dispatches tool calls, and classifies handoffs.
 
     Args:
         max_turns: Maximum number of provider round-trips before
@@ -50,27 +57,45 @@ class Runner:
         session: Session,
         state: State,
         context_start: int = 0,
+        handoffs: list[Handoff] | None = None,
     ) -> RunResult:
         """Run the agent loop until a final response or handoff.
 
         Builds messages from ``session.transcript[context_start:]``
-        with the system prompt prepended. Executes tool calls,
+        with the system prompt prepended.  Executes tool calls,
         appends results to the transcript, and returns when the
-        provider produces a text response or a tool triggers a handoff.
+        provider produces a text response or the model invokes a
+        handoff tool.
 
         Args:
             agent: The agent to execute.
-            session: The session containing the conversation transcript.
+            session: The session containing the conversation
+                transcript.
             state: The application state passed to tools via Context.
             context_start: Transcript index to start reading from.
                 Used by Swarm for fresh-context handoffs.
+            handoffs: Optional list of Handoff objects.  Their
+                tool schemas are sent to the provider alongside
+                regular tools.  When the model calls a handoff tool
+                the Runner returns immediately without executing
+                any function.
 
         Returns:
             A RunResult with the final message and optional handoff.
         """
         ctx = Context(session=session, state=state, agent=agent)
         tool_registry = agent.tool_registry
-        tool_schemas = [t.model_dump() for t in tool_registry.values()]
+
+        # Build handoff map (tool_name -> Handoff)
+        handoff_map: dict[str, Handoff] = {
+            h.tool_name: h for h in (handoffs or [])
+        }
+
+        # Merge tool schemas: regular tools + handoff tools
+        tool_schemas = [
+            t.model_dump() for t in tool_registry.values()
+        ]
+        tool_schemas += [h.tool_schema() for h in (handoffs or [])]
 
         for _ in range(self.max_turns):
             # Build messages: system prompt + transcript window
@@ -96,13 +121,55 @@ class Runner:
                 return RunResult(
                     last_message=assistant_msg,
                     agent_name=agent.name,
-                    hand_off=None,
                 )
 
             # Process tool calls
             for tool_call in response.tool_calls:
                 if tool_call.type != "function":
                     continue
+
+                func_name = tool_call.function.name
+                call_id = tool_call.id
+
+                # ----- Classify: handoff or regular tool? -----
+                if func_name in handoff_map:
+                    handoff_obj = handoff_map[func_name]
+                    try:
+                        args = json.loads(
+                            tool_call.function.arguments
+                        )
+                    except json.JSONDecodeError:
+                        args = {}
+                    message = args.get("message", "")
+
+                    session.transcript.append(
+                        ToolCallRequestMessage(
+                            role=MessageRole.ASSISTANT,
+                            tool_calls=[tool_call],
+                        )
+                    )
+                    session.transcript.append(
+                        ToolCallResultMessage(
+                            role=MessageRole.TOOL,
+                            content=(
+                                "Transferring to "
+                                f"{handoff_obj.target_agent}"
+                            ),
+                            tool_call_id=call_id,
+                        )
+                    )
+                    return RunResult(
+                        last_message=session.transcript[-1],
+                        agent_name=agent.name,
+                        hand_off=HandoffResult(
+                            target_agent=(
+                                handoff_obj.target_agent
+                            ),
+                            message=message,
+                        ),
+                    )
+
+                # ----- Regular tool execution -----
 
                 # Append the tool call request to transcript
                 session.transcript.append(
@@ -112,44 +179,57 @@ class Runner:
                     )
                 )
 
-                func_name = tool_call.function.name
-                call_id = tool_call.id
-
                 # Look up in resolved tool registry
                 tool_obj = tool_registry.get(func_name)
                 if tool_obj is None:
-                    logger.warning(f"Tool not found: {func_name}")
+                    logger.warning(
+                        f"Tool not found: {func_name}"
+                    )
                     session.transcript.append(
                         ToolCallResultMessage(
                             role=MessageRole.TOOL,
-                            content=f"Error: tool '{func_name}' not found",
+                            content=(
+                                f"Error: tool '{func_name}' "
+                                "not found"
+                            ),
                             tool_call_id=call_id,
                         )
                     )
                     continue
 
                 # Parse arguments and inject context if needed
-                # TODO: Add self-healing for malformed tool calls — use a
-                # secondary model to repair the JSON or re-map arguments
-                # before falling back to the error path.
+                # TODO: Add self-healing for malformed tool
+                # calls — use a secondary model to repair the
+                # JSON or re-map arguments before falling back
+                # to the error path.
                 try:
-                    params = json.loads(tool_call.function.arguments)
+                    params = json.loads(
+                        tool_call.function.arguments
+                    )
                 except json.JSONDecodeError as e:
                     logger.warning(
-                        f"Invalid JSON in arguments for {func_name}: {e}"
+                        "Invalid JSON in arguments for "
+                        f"{func_name}: {e}"
                     )
                     session.transcript.append(
                         ToolCallResultMessage(
                             role=MessageRole.TOOL,
-                            content=f"Error: invalid arguments — {e}",
+                            content=(
+                                f"Error: invalid arguments — {e}"
+                            ),
                             tool_call_id=call_id,
                         )
                     )
                     continue
 
-                logger.info(f"Calling {func_name} with {params}")
+                logger.info(
+                    f"Calling {func_name} with {params}"
+                )
 
-                if "context" in inspect.signature(tool_obj.func).parameters:
+                if (
+                    "context"
+                    in inspect.signature(tool_obj.func).parameters
+                ):
                     params["context"] = ctx
 
                 try:
@@ -167,33 +247,26 @@ class Runner:
                     )
                     continue
                 except Exception as e:
-                    logger.error(f"Tool {func_name} raised: {e}")
+                    logger.error(
+                        f"Tool {func_name} raised: {e}"
+                    )
                     session.transcript.append(
                         ToolCallResultMessage(
                             role=MessageRole.TOOL,
-                            content=f"Error calling {func_name}: {e}",
+                            content=(
+                                f"Error calling {func_name}: {e}"
+                            ),
                             tool_call_id=call_id,
                         )
                     )
                     continue
 
-                # Check for handoff
-                if isinstance(result.output, HandoffResult):
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=f"Transferring to {result.output.target_agent}",
-                            tool_call_id=call_id,
-                        )
-                    )
-                    return RunResult(
-                        last_message=session.transcript[-1],
-                        agent_name=agent.name,
-                        hand_off=result.output,
-                    )
-
                 # Normal tool result
-                output_str = json.dumps(result.output) if not isinstance(result.output, str) else result.output
+                output_str = (
+                    json.dumps(result.output)
+                    if not isinstance(result.output, str)
+                    else result.output
+                )
                 session.transcript.append(
                     ToolCallResultMessage(
                         role=MessageRole.TOOL,
@@ -211,5 +284,4 @@ class Runner:
         return RunResult(
             last_message=timeout_msg,
             agent_name=agent.name,
-            hand_off=None,
         )

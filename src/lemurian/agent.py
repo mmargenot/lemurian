@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 from lemurian.capability import Capability
+from lemurian.handoff import Handoff
 from lemurian.provider import ModelProvider
 from lemurian.tools import Tool
 
@@ -14,10 +15,12 @@ class Agent(BaseModel):
 
     Args:
         name: Unique name identifying this agent.
-        description: Short description used in the Swarm's handoff tool
+        description: Short description used in handoff tool descriptions
             to help the LLM choose which agent to hand off to.
         system_prompt: System prompt injected by the Runner at call time.
         tools: List of Tool objects available to this agent.
+        handoffs: List of Handoff objects declaring which agents this
+            agent can transfer to.  Use the ``handoff()`` factory.
         capabilities: List of Capability instances whose tools are
             merged into this agent's tool registry at resolution time.
         model: Model identifier passed to the provider.
@@ -30,6 +33,7 @@ class Agent(BaseModel):
     description: str = ""
     system_prompt: str
     tools: list[Tool] = Field(default_factory=list)
+    handoffs: list[Handoff] = Field(default_factory=list)
     capabilities: list[Capability] = Field(default_factory=list)
     model: str
     provider: ModelProvider

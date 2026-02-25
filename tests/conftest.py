@@ -204,6 +204,7 @@ def make_agent(mock_provider):
     def _make(
         name="test_agent",
         tools=None,
+        handoffs=None,
         capabilities=None,
         system_prompt="You are helpful.",
         description="",
@@ -214,6 +215,7 @@ def make_agent(mock_provider):
             description=description,
             system_prompt=system_prompt,
             tools=tools or [],
+            handoffs=handoffs or [],
             capabilities=capabilities or [],
             model="mock-model",
             provider=provider or mock_provider,

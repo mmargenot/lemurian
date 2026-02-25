@@ -4,11 +4,12 @@ import pytest
 
 from lemurian.agent import Agent
 from lemurian.context import Context
+from lemurian.handoff import Handoff
 from lemurian.message import Message, MessageRole, ToolCallResultMessage
 from lemurian.runner import Runner
 from lemurian.session import Session
 from lemurian.state import State
-from lemurian.tools import HandoffResult, LLMRecoverableError, tool
+from lemurian.tools import LLMRecoverableError, tool
 
 from tests.conftest import (
     MockCapability,
@@ -47,12 +48,6 @@ def context_reader(context: Context, query: str):
 async def async_echo(text: str):
     """Async echo."""
     return f"async: {text}"
-
-
-@tool
-def do_handoff(context: Context, target: str):
-    """Triggers a handoff."""
-    return HandoffResult(target_agent=target, message="handing off")
 
 
 # ---------------------------------------------------------------------------
@@ -191,19 +186,32 @@ class TestRunnerHandoff:
     async def test_handoff_detection(
         self, make_agent, mock_provider
     ):
+        """Runner classifies a handoff tool call by name map."""
+        billing_handoff = Handoff(
+            tool_name="transfer_to_billing",
+            tool_description="Hand off to billing.",
+            target_agent="billing",
+        )
         mock_provider.responses = [
             make_tool_call_response(
-                "do_handoff", {"target": "billing"}
+                "transfer_to_billing",
+                {"message": "Customer needs billing help"},
             ),
         ]
-        agent = make_agent(tools=[do_handoff])
+        agent = make_agent()
         session = Session(session_id="s1")
 
-        result = await Runner().run(agent, session, State())
+        result = await Runner().run(
+            agent, session, State(),
+            handoffs=[billing_handoff],
+        )
 
         assert result.hand_off is not None
         assert result.hand_off.target_agent == "billing"
-        assert result.hand_off.message == "handing off"
+        assert (
+            result.hand_off.message
+            == "Customer needs billing help"
+        )
         assert (
             "Transferring to billing"
             in session.transcript[-1].content
@@ -446,19 +454,17 @@ class TestRunnerMultiToolCall:
             call_log.append(label)
             return f"tracked: {label}"
 
-        @tool
-        def trigger_handoff(context: Context, target: str):
-            """Triggers a handoff."""
-            call_log.append("handoff")
-            return HandoffResult(
-                target_agent=target, message="handing off"
-            )
+        billing_handoff = Handoff(
+            tool_name="transfer_to_billing",
+            tool_description="Hand off to billing.",
+            target_agent="billing",
+        )
 
         mock_provider.responses = [
             make_multi_tool_call_response([
                 (
-                    "trigger_handoff",
-                    {"target": "billing"},
+                    "transfer_to_billing",
+                    {"message": "handing off"},
                     "call_1",
                 ),
                 (
@@ -468,14 +474,16 @@ class TestRunnerMultiToolCall:
                 ),
             ]),
         ]
-        agent = make_agent(tools=[track_call, trigger_handoff])
+        agent = make_agent(tools=[track_call])
         session = Session(session_id="s1")
 
-        result = await Runner().run(agent, session, State())
+        result = await Runner().run(
+            agent, session, State(),
+            handoffs=[billing_handoff],
+        )
 
         assert result.hand_off is not None
         assert result.hand_off.target_agent == "billing"
-        assert "handoff" in call_log
         assert "should_not_run" not in call_log
 
 

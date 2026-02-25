@@ -22,7 +22,8 @@ from lemurian.runner import Runner
 from lemurian.session import Session
 from lemurian.state import State
 from lemurian.swarm import Swarm
-from lemurian.tools import HandoffResult, LLMRecoverableError, tool
+from lemurian.handoff import handoff
+from lemurian.tools import LLMRecoverableError, tool
 
 from tests.conftest import (
     MockCapability,
@@ -382,6 +383,10 @@ class TestMultiAgentHandoffChain:
             system_prompt="Route.",
             model="m",
             provider=provider,
+            handoffs=[
+                handoff("writer", "Creates tickets"),
+                handoff("reader", "Reads tickets"),
+            ],
         )
         writer = Agent(
             name="writer",
@@ -390,6 +395,7 @@ class TestMultiAgentHandoffChain:
             model="m",
             provider=provider,
             tools=[create_ticket],
+            handoffs=[handoff("reader", "Reads tickets")],
         )
         reader = Agent(
             name="reader",
@@ -405,22 +411,16 @@ class TestMultiAgentHandoffChain:
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "writer",
-                    "message": "Create a ticket for billing issue",
-                },
+                "transfer_to_writer",
+                {"message": "Create a ticket for billing issue"},
             ),
             make_tool_call_response(
                 "create_ticket",
                 {"title": "Billing issue", "priority": "high"},
             ),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "reader",
-                    "message": "Read back the tickets",
-                },
+                "transfer_to_reader",
+                {"message": "Read back the tickets"},
             ),
             make_tool_call_response("read_tickets", {}),
             make_text_response("Found 1 ticket"),
@@ -450,6 +450,7 @@ class TestMultiAgentHandoffChain:
             model="m",
             provider=provider,
             tools=[add_to_catalog],
+            handoffs=[handoff("orderer", "Orders")],
         )
         orderer = Agent(
             name="orderer",
@@ -458,6 +459,7 @@ class TestMultiAgentHandoffChain:
             model="m",
             provider=provider,
             tools=[place_order],
+            handoffs=[handoff("writer", "Writes")],
         )
 
         state = CatalogState()
@@ -469,16 +471,13 @@ class TestMultiAgentHandoffChain:
                 {"isbn": "isbn-1", "title": "The Raven"},
             ),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "orderer", "message": "Order isbn-1"},
+                "transfer_to_orderer",
+                {"message": "Order isbn-1"},
             ),
             make_tool_call_response("place_order", {"isbn": "isbn-1"}),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "writer",
-                    "message": "Add another book",
-                },
+                "transfer_to_writer",
+                {"message": "Add another book"},
             ),
             make_tool_call_response(
                 "add_to_catalog",
@@ -517,6 +516,7 @@ class TestContextWindowingMultiHop:
             system_prompt="I am A.",
             model="m",
             provider=provider,
+            handoffs=[handoff("b", "Agent B")],
         )
         agent_b = Agent(
             name="b",
@@ -530,11 +530,8 @@ class TestContextWindowingMultiHop:
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "b",
-                    "message": "Handle this for me",
-                },
+                "transfer_to_b",
+                {"message": "Handle this for me"},
             ),
             make_text_response("B here, handled it."),
         ]
@@ -568,26 +565,40 @@ class TestContextWindowingMultiHop:
         provider = MockProvider()
         call_log = provider.call_log
 
-        agents = [
-            Agent(
-                name=n,
-                description=n,
-                system_prompt=f"I am {n}.",
-                model="m",
-                provider=provider,
-            )
-            for n in ("a", "b", "c")
-        ]
+        agent_a = Agent(
+            name="a",
+            description="a",
+            system_prompt="I am a.",
+            model="m",
+            provider=provider,
+            handoffs=[handoff("b", "b")],
+        )
+        agent_b = Agent(
+            name="b",
+            description="b",
+            system_prompt="I am b.",
+            model="m",
+            provider=provider,
+            handoffs=[handoff("c", "c")],
+        )
+        agent_c = Agent(
+            name="c",
+            description="c",
+            system_prompt="I am c.",
+            model="m",
+            provider=provider,
+        )
+        agents = [agent_a, agent_b, agent_c]
         swarm = Swarm(agents=agents)
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Msg for B"},
+                "transfer_to_b",
+                {"message": "Msg for B"},
             ),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "c", "message": "Msg for C"},
+                "transfer_to_c",
+                {"message": "Msg for C"},
             ),
             make_text_response("C done."),
         ]
@@ -634,6 +645,7 @@ class TestErrorRecoveryWithHandoff:
             model="m",
             provider=provider,
             tools=[fragile_tool],
+            handoffs=[handoff("b", "Agent B")],
         )
         agent_b = Agent(
             name="b",
@@ -647,11 +659,8 @@ class TestErrorRecoveryWithHandoff:
         provider.responses = [
             make_tool_call_response("fragile_tool", {"msg": "bad"}),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "b",
-                    "message": "I had an error, you handle it",
-                },
+                "transfer_to_b",
+                {"message": "I had an error, you handle it"},
             ),
             make_text_response("B handled it."),
         ]
@@ -689,6 +698,7 @@ class TestErrorRecoveryWithHandoff:
             model="m",
             provider=provider,
             tools=[strict_tool],
+            handoffs=[handoff("b", "Agent B")],
         )
         agent_b = Agent(
             name="b",
@@ -704,11 +714,8 @@ class TestErrorRecoveryWithHandoff:
             make_tool_call_response("strict_tool", {"value": -1}),
             make_tool_call_response("strict_tool", {"value": 5}),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "b",
-                    "message": "Counter updated to 5",
-                },
+                "transfer_to_b",
+                {"message": "Counter updated to 5"},
             ),
             make_text_response("B confirms counter is 5."),
         ]
@@ -822,25 +829,17 @@ class TestBatchToolCallsStateMutation:
     ):
         """Handoff mid-batch prevents later tools from executing.
 
-        Runner iterates tool_calls sequentially; when any tool returns a
-        HandoffResult the Runner returns immediately, skipping remaining
+        Runner iterates tool_calls sequentially; when any tool triggers a
+        handoff the Runner returns immediately, skipping remaining
         calls in the batch.  This is intentional — a handoff transfers
         control, so later tools from the *old* agent must not execute.
         """
-        call_log = []
 
         @tool
         def tracked_increment(context: Context, label: str):
             """Increment and track."""
-            call_log.append(label)
             context.state.counter += 1
             return str(context.state.counter)
-
-        @tool
-        def trigger_handoff(context: Context, target: str):
-            """Trigger handoff."""
-            call_log.append("handoff")
-            return HandoffResult(target_agent=target, message="Handing off")
 
         provider = MockProvider()
         agent_a = Agent(
@@ -849,7 +848,8 @@ class TestBatchToolCallsStateMutation:
             system_prompt="A.",
             model="m",
             provider=provider,
-            tools=[tracked_increment, trigger_handoff],
+            tools=[tracked_increment],
+            handoffs=[handoff("b", "Agent B")],
         )
         agent_b = Agent(
             name="b",
@@ -864,7 +864,7 @@ class TestBatchToolCallsStateMutation:
         provider.responses = [
             make_multi_tool_call_response(
                 [
-                    ("trigger_handoff", {"target": "b"}, "c1"),
+                    ("transfer_to_b", {"message": "Handing off"}, "c1"),
                     (
                         "tracked_increment",
                         {"label": "should_not_run"},
@@ -879,8 +879,6 @@ class TestBatchToolCallsStateMutation:
 
         assert result.active_agent == "b"
         assert state.counter == 0
-        assert "handoff" in call_log
-        assert "should_not_run" not in call_log
 
 
 # ===================================================================
@@ -999,6 +997,7 @@ class TestCapabilityLifecycle:
             system_prompt="A.",
             model="m",
             provider=provider,
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1006,6 +1005,7 @@ class TestCapabilityLifecycle:
             system_prompt="B.",
             model="m",
             provider=provider,
+            handoffs=[handoff("a", "A")],
         )
         swarm = Swarm(agents=[a, b])
         cap = MockCapability(name="special", tool_list=[special_tool])
@@ -1031,7 +1031,7 @@ class TestCapabilityLifecycle:
             t["function"]["name"] for t in provider.call_log[-1]["tools"]
         ]
         assert "special_tool" not in tool_names_b
-        assert "handoff" in tool_names_b
+        assert "transfer_to_a" in tool_names_b
 
     def test_on_detach_cleans_state(self):
         """on_detach modifies state on removal."""
@@ -1158,6 +1158,7 @@ class TestCapabilityLifecycle:
             provider=provider,
             tools=[direct_tool],
             capabilities=[a_cap],
+            handoffs=[handoff("b", "Checker")],
         )
         agent_b = Agent(
             name="b",
@@ -1176,8 +1177,8 @@ class TestCapabilityLifecycle:
             make_tool_call_response("agent_cap_tool", {"msg": "world"}, "c2"),
             make_tool_call_response("swarm_cap_tool", {"msg": "foo"}, "c3"),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Check the log"},
+                "transfer_to_b",
+                {"message": "Check the log"},
             ),
             make_tool_call_response("check_log", {}, "check_log_call"),
             make_text_response("Log verified."),
@@ -1272,6 +1273,7 @@ class TestSwarmMultiTurnPersistence:
             system_prompt="A.",
             model="m",
             provider=provider,
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1287,8 +1289,8 @@ class TestSwarmMultiTurnPersistence:
         # Turn 1: A hands off to B
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Your turn"},
+                "transfer_to_b",
+                {"message": "Your turn"},
             ),
             make_text_response("B here in turn 1"),
         ]
@@ -1325,6 +1327,7 @@ class TestNestedStateMutationsAcrossHandoffs:
             model="m",
             provider=provider,
             tools=[update_prefs],
+            handoffs=[handoff("display", "Display manager")],
         )
         b = Agent(
             name="display",
@@ -1340,11 +1343,8 @@ class TestNestedStateMutationsAcrossHandoffs:
         provider.responses = [
             make_tool_call_response("update_prefs", {"theme": "dark"}),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "display",
-                    "message": "Show current prefs",
-                },
+                "transfer_to_display",
+                {"message": "Show current prefs"},
             ),
             make_tool_call_response("read_prefs", {}),
             make_text_response("Dark theme active"),
@@ -1424,6 +1424,7 @@ class TestMaxTurnsHandoffInteraction:
             model="m",
             provider=provider,
             tools=[increment],
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1432,6 +1433,7 @@ class TestMaxTurnsHandoffInteraction:
             model="m",
             provider=provider,
             tools=[increment],
+            handoffs=[handoff("a", "A")],
         )
         state = CounterState()
         swarm = Swarm(agents=[a, b], state=state, max_handoffs=2)
@@ -1439,18 +1441,18 @@ class TestMaxTurnsHandoffInteraction:
         provider.responses = [
             make_tool_call_response("increment", {}),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "your turn"},
+                "transfer_to_b",
+                {"message": "your turn"},
             ),
             make_tool_call_response("increment", {}),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "a", "message": "back to you"},
+                "transfer_to_a",
+                {"message": "back to you"},
             ),
             make_tool_call_response("increment", {}),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "once more"},
+                "transfer_to_b",
+                {"message": "once more"},
             ),
         ]
 
@@ -1493,6 +1495,7 @@ class TestToolSchemaIntegration:
             model="m",
             provider=provider,
             tools=[direct_tool],
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1512,7 +1515,7 @@ class TestToolSchemaIntegration:
         assert tool_names == {
             "direct_tool",
             "cap_tool",
-            "handoff",
+            "transfer_to_b",
         }
 
 
@@ -1544,6 +1547,7 @@ class TestTranscriptIntegrity:
             model="m",
             provider=provider,
             tools=[ping],
+            handoffs=[handoff("b", "Ponger")],
         )
         b = Agent(
             name="b",
@@ -1558,8 +1562,8 @@ class TestTranscriptIntegrity:
         provider.responses = [
             make_tool_call_response("ping", {}, "c1"),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Your turn"},
+                "transfer_to_b",
+                {"message": "Your turn"},
             ),
             make_tool_call_response("ping", {}, "c3"),
             make_text_response("All done"),
@@ -1656,6 +1660,7 @@ class TestSystemPromptLifecycle:
             system_prompt="You are Agent A.",
             model="m",
             provider=provider,
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1668,8 +1673,8 @@ class TestSystemPromptLifecycle:
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Go to B"},
+                "transfer_to_b",
+                {"message": "Go to B"},
             ),
             make_text_response("B here."),
         ]
@@ -1695,6 +1700,7 @@ class TestSystemPromptLifecycle:
             system_prompt="Sys A.",
             model="m",
             provider=provider,
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1707,8 +1713,8 @@ class TestSystemPromptLifecycle:
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Go B"},
+                "transfer_to_b",
+                {"message": "Go B"},
             ),
             make_text_response("B done"),
         ]
@@ -1747,6 +1753,7 @@ class TestContextAgentIdentityHandoff:
             model="m",
             provider=provider,
             tools=[who_am_i],
+            handoffs=[handoff("beta", "Beta")],
         )
         b = Agent(
             name="beta",
@@ -1761,11 +1768,8 @@ class TestContextAgentIdentityHandoff:
         provider.responses = [
             make_tool_call_response("who_am_i", {}, "c1"),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "beta",
-                    "message": "Who are you?",
-                },
+                "transfer_to_beta",
+                {"message": "Who are you?"},
             ),
             make_tool_call_response("who_am_i", {}, "c3"),
             make_text_response("Done"),
@@ -1894,6 +1898,7 @@ class TestEdgeCases:
             model="m",
             provider=provider,
             tools=[noop_tool],
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b",
@@ -1908,8 +1913,8 @@ class TestEdgeCases:
         provider.responses = [
             make_tool_call_response("noop_tool", {}),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "Go B"},
+                "transfer_to_b",
+                {"message": "Go B"},
             ),
             make_tool_call_response("noop_tool", {}),
             make_text_response("Done"),
@@ -2160,15 +2165,6 @@ class TestEdgeCases:
     async def test_handoff_to_invalid_agent_returns_error(self):
         """Handoff to a non-existent agent returns an error message
         without crashing."""
-
-        @tool
-        def force_handoff(context: Context):
-            """Force a handoff to a bogus target."""
-            return HandoffResult(
-                target_agent="does_not_exist",
-                message="Go to ghost",
-            )
-
         provider = MockProvider()
         agent = Agent(
             name="a",
@@ -2176,7 +2172,7 @@ class TestEdgeCases:
             system_prompt="A.",
             model="m",
             provider=provider,
-            tools=[force_handoff],
+            handoffs=[handoff("does_not_exist", "Ghost agent")],
         )
         b = Agent(
             name="b",
@@ -2188,7 +2184,10 @@ class TestEdgeCases:
         swarm = Swarm(agents=[agent, b])
 
         provider.responses = [
-            make_tool_call_response("force_handoff", {}),
+            make_tool_call_response(
+                "transfer_to_does_not_exist",
+                {"message": "Go to ghost"},
+            ),
         ]
         result = await swarm.run("Go", agent="a")
 
@@ -2275,6 +2274,7 @@ class TestFullEndToEndLifecycle:
             model="m",
             provider=provider,
             tools=[create_ticket],
+            handoffs=[handoff("dispatch", "Assigns tickets")],
         )
         agent_b = Agent(
             name="dispatch",
@@ -2283,6 +2283,7 @@ class TestFullEndToEndLifecycle:
             model="m",
             provider=provider,
             tools=[assign_ticket],
+            handoffs=[handoff("auditor", "Audits logs")],
         )
         agent_c = Agent(
             name="auditor",
@@ -2302,22 +2303,16 @@ class TestFullEndToEndLifecycle:
                 {"title": "Server down", "priority": "critical"},
             ),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "dispatch",
-                    "message": "Assign ticket #1 to ops team",
-                },
+                "transfer_to_dispatch",
+                {"message": "Assign ticket #1 to ops team"},
             ),
             make_tool_call_response(
                 "assign_ticket",
                 {"ticket_id": 1, "agent_name": "ops_team"},
             ),
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "auditor",
-                    "message": "Audit the actions taken",
-                },
+                "transfer_to_auditor",
+                {"message": "Audit the actions taken"},
             ),
             make_text_response("Audit complete."),
         ]
