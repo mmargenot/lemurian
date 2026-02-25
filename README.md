@@ -25,7 +25,7 @@
 
 **Swarm** — Multi-agent orchestrator. Creates a dynamic `handoff` tool with an enum of available agents. Fresh-context handoffs: each agent sees only the handoff message onward.
 
-**Provider** — Abstraction over LLM APIs. Implementations for OpenAI, OpenRouter, local vLLM, and Modal vLLM.
+**Provider** — Abstraction over LLM APIs. Implementations for OpenAI, OpenRouter, local vLLM, Modal vLLM, any OpenAI-compatible endpoint, and 100+ providers via LiteLLM.
 
 ## Defining Tools
 
@@ -208,6 +208,55 @@ Customize deployments with environment variables:
 Pre-download model weights for faster cold starts:
 ```bash
 modal run examples/modal_vllm.py --download
+```
+
+### Any OpenAI-Compatible Server
+
+Works with Ollama, Together, Groq, Fireworks, LM Studio, or any server with an OpenAI-compatible `/chat/completions` endpoint:
+
+```python
+from lemurian.provider import OpenAICompatibleProvider
+
+# Ollama
+provider = OpenAICompatibleProvider(
+    base_url="http://localhost:11434/v1"
+)
+
+# Together AI
+provider = OpenAICompatibleProvider(
+    base_url="https://api.together.xyz/v1",
+    api_key="your-together-key",
+)
+
+# Groq
+provider = OpenAICompatibleProvider(
+    base_url="https://api.groq.com/openai/v1",
+    api_key="your-groq-key",
+)
+```
+
+### LiteLLM (100+ Providers)
+
+Access Anthropic, Gemini, Cohere, Bedrock, Mistral, Azure, and [100+ other providers](https://docs.litellm.ai/docs/providers) through LiteLLM. Install it separately:
+
+```bash
+pip install litellm
+# or: uv sync --group litellm
+```
+
+```python
+from lemurian.provider import LiteLLMProvider
+
+# Anthropic
+provider = LiteLLMProvider()  # uses ANTHROPIC_API_KEY env var
+agent = Agent(..., model="anthropic/claude-sonnet-4-20250514", provider=provider)
+
+# Google Gemini
+provider = LiteLLMProvider()  # uses GEMINI_API_KEY env var
+agent = Agent(..., model="gemini/gemini-2.0-flash", provider=provider)
+
+# Explicit API key
+provider = LiteLLMProvider(api_key="sk-...")
 ```
 
 ## Testing
