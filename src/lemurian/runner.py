@@ -31,9 +31,10 @@ class RunResult:
 class Runner:
     """Executes an agent's tool-calling loop.
 
-    The Runner is the only component that reads or writes the session
-    transcript. It injects the system prompt at call time (never storing
-    it in the transcript), dispatches tool calls, and detects handoffs.
+    The Runner reads the session transcript and appends assistant
+    responses, tool-call requests, and tool results during its loop.
+    It injects the system prompt at call time (never storing it in
+    the transcript), dispatches tool calls, and detects handoffs.
 
     Args:
         max_turns: Maximum number of provider round-trips before
