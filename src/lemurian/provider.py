@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 import os
@@ -7,6 +9,24 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+@dataclass
+class CompletionResult:
+    """Wraps a provider response with optional usage metadata.
+
+    Args:
+        content: The text content of the response.
+        tool_calls: List of tool call objects, or None.
+        usage: Token usage object from the provider, or None.
+        response_model: The actual model string returned by the
+            provider, or None.
+    """
+
+    content: str | None = None
+    tool_calls: list | None = None
+    usage: object | None = None
+    response_model: str | None = None
+
+
 class ModelProvider:
     """Base class for model providers.
 
@@ -14,6 +34,8 @@ class ModelProvider:
     Providers receive pre-built message and tool schema dicts from
     the Runner — they do not interact with lemurian types directly.
     """
+
+    system_name: str = "unknown"
 
     def __init__(self):
         pass
@@ -63,6 +85,8 @@ class OpenAIProvider(ModelProvider):
             environment variable if not provided.
     """
 
+    system_name: str = "openai"
+
     def __init__(self, api_key: str | None = None):
         if not api_key:
             api_key = os.getenv("OPENAI_API_KEY")
@@ -86,7 +110,13 @@ class OpenAIProvider(ModelProvider):
         if tools:
             kwargs["tools"] = tools
         response = await self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message
+        msg = response.choices[0].message
+        return CompletionResult(
+            content=msg.content,
+            tool_calls=msg.tool_calls,
+            usage=getattr(response, "usage", None),
+            response_model=getattr(response, "model", None),
+        )
 
     async def structured_completion(
             self,
@@ -109,6 +139,8 @@ class OpenRouter(ModelProvider):
         api_key: OpenRouter API key. Falls back to the
             ``OPENROUTER_API_KEY`` environment variable if not provided.
     """
+
+    system_name: str = "openrouter"
 
     def __init__(self, api_key: str | None = None):
         if not api_key:
@@ -134,7 +166,13 @@ class OpenRouter(ModelProvider):
         if tools:
             kwargs["tools"] = tools
         response = await self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message
+        msg = response.choices[0].message
+        return CompletionResult(
+            content=msg.content,
+            tool_calls=msg.tool_calls,
+            usage=getattr(response, "usage", None),
+            response_model=getattr(response, "model", None),
+        )
 
     async def structured_completion(
             self,
@@ -158,6 +196,8 @@ class VLLMProvider(ModelProvider):
         port: Port the vLLM server is listening on.
     """
 
+    system_name: str = "vllm"
+
     def __init__(self, url: str, port: int):
         self.base_url = f"http://{url}:{port}/v1"
         self.client = AsyncOpenAI(base_url=self.base_url, api_key="DUMMY")
@@ -176,7 +216,13 @@ class VLLMProvider(ModelProvider):
         if tools:
             kwargs["tools"] = tools
         response = await self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message
+        msg = response.choices[0].message
+        return CompletionResult(
+            content=msg.content,
+            tool_calls=msg.tool_calls,
+            usage=getattr(response, "usage", None),
+            response_model=getattr(response, "model", None),
+        )
 
     async def structured_completion(
             self,
@@ -207,6 +253,8 @@ class ModalVLLMProvider(ModelProvider):
         timeout: Request timeout in seconds.
         max_retries: Maximum retries for failed requests.
     """
+
+    system_name: str = "vllm"
 
     def __init__(
         self,
@@ -246,7 +294,13 @@ class ModalVLLMProvider(ModelProvider):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         response = await self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message
+        msg = response.choices[0].message
+        return CompletionResult(
+            content=msg.content,
+            tool_calls=msg.tool_calls,
+            usage=getattr(response, "usage", None),
+            response_model=getattr(response, "model", None),
+        )
 
     async def structured_completion(
             self,

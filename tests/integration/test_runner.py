@@ -1,7 +1,9 @@
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
+import lemurian.instrumentation as inst
 from lemurian.agent import Agent
 from lemurian.context import Context
 from lemurian.handoff import Handoff
@@ -11,10 +13,11 @@ from lemurian.session import Session
 from lemurian.state import State
 from lemurian.tools import LLMRecoverableError, tool
 
+from lemurian.provider import CompletionResult
+
 from tests.conftest import (
     MockCapability,
     MockFunction,
-    MockResponse,
     MockToolCall,
     make_multi_tool_call_response,
     make_text_response,
@@ -338,7 +341,7 @@ class TestRunnerErrorPaths:
         self, make_agent, mock_provider
     ):
         """Malformed JSON in tool_call arguments is recorded as an error."""
-        bad_response = MockResponse(
+        bad_response = CompletionResult(
             tool_calls=[
                 MockToolCall(
                     id="call_1",
@@ -543,3 +546,138 @@ class TestRunnerCapabilityTools:
         sent_tools = mock_provider.call_log[0]["tools"]
         tool_names = [t["function"]["name"] for t in sent_tools]
         assert "raven" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# End-to-end OpenTelemetry integration
+# ---------------------------------------------------------------------------
+
+class TestRunnerInstrumentation:
+    """Verify that the runner creates the expected OTel spans when
+    instrumentation is enabled.
+
+    The mock tracer produces a distinct MagicMock span per
+    ``start_as_current_span`` call, stored in ``self.spans``
+    keyed by span name.  This lets tests assert attributes
+    land on the *right* span.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _mock_tracer(self):
+        """Install a mock tracer and tear it down after each test."""
+        self.spans: dict[str, MagicMock] = {}
+        self.mock_tracer = MagicMock()
+
+        def _make_cm(name, **kwargs):
+            span = MagicMock()
+            self.spans[name] = span
+            cm = MagicMock()
+            cm.__enter__ = MagicMock(return_value=span)
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
+        self.mock_tracer.start_as_current_span.side_effect = (
+            _make_cm
+        )
+        inst._tracer = self.mock_tracer
+        yield
+        inst._tracer = None
+
+    def _span_names(self) -> list[str]:
+        """Return names of all spans opened by the mock tracer."""
+        return [
+            call.args[0]
+            for call in self.mock_tracer.start_as_current_span.call_args_list
+        ]
+
+    @pytest.mark.asyncio
+    async def test_simple_response_creates_agent_and_chat_spans(
+        self, make_agent, mock_provider
+    ):
+        mock_provider.responses = [make_text_response("Hi")]
+        agent = make_agent(name="helper")
+        session = Session(session_id="s1")
+
+        await Runner().run(agent, session, State())
+
+        names = self._span_names()
+        assert names[0] == "invoke_agent helper"
+        assert names[1] == "chat mock-model"
+        assert len(names) == 2
+
+    @pytest.mark.asyncio
+    async def test_tool_call_creates_all_three_span_types(
+        self, make_agent, mock_provider
+    ):
+        mock_provider.responses = [
+            make_tool_call_response("echo", {"text": "hi"}),
+            make_text_response("Done"),
+        ]
+        agent = make_agent(tools=[echo])
+        session = Session(session_id="s1")
+
+        await Runner().run(agent, session, State())
+
+        names = self._span_names()
+        assert "invoke_agent test_agent" in names
+        assert any(n.startswith("chat ") for n in names)
+        assert "execute_tool echo" in names
+
+    @pytest.mark.asyncio
+    async def test_usage_recorded_on_completion_span(
+        self, make_agent, mock_provider
+    ):
+        usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+        mock_provider.responses = [
+            CompletionResult(
+                content="Hi",
+                usage=usage,
+                response_model="gpt-4o-2024-08-06",
+            )
+        ]
+        agent = make_agent()
+        session = Session(session_id="s1")
+
+        await Runner().run(agent, session, State())
+
+        # Attributes land on the completion span, not the agent span
+        c_span = self.spans["chat mock-model"]
+        c_span.set_attribute.assert_any_call(
+            "gen_ai.usage.input_tokens", 10
+        )
+        c_span.set_attribute.assert_any_call(
+            "gen_ai.usage.output_tokens", 5
+        )
+        c_span.set_attribute.assert_any_call(
+            "gen_ai.response.model", "gpt-4o-2024-08-06"
+        )
+        # Agent span should NOT have usage attributes
+        a_span = self.spans["invoke_agent test_agent"]
+        a_span.set_attribute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tool_error_recorded_on_span(
+        self, make_agent, mock_provider
+    ):
+        """When a tool raises, record_error marks the tool span."""
+
+        @tool
+        def explode():
+            """Always fails."""
+            raise RuntimeError("kaboom")
+
+        mock_provider.responses = [
+            make_tool_call_response("explode", {}),
+            make_text_response("Recovered"),
+        ]
+        agent = make_agent(tools=[explode])
+        session = Session(session_id="s1")
+
+        await Runner().run(agent, session, State())
+
+        t_span = self.spans["execute_tool explode"]
+        t_span.set_status.assert_called_once()
+        t_span.record_exception.assert_called_once()
+        t_span.set_attribute.assert_any_call(
+            "error.type", "RuntimeError"
+        )
