@@ -1,13 +1,16 @@
 import inspect
 import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from lemurian.agent import Agent
 from lemurian.context import Context
+from lemurian.events import RawResponseEvent, RunCompleteEvent, RunItemEvent, StreamEvent
 from lemurian.message import Message, MessageRole, ToolCallRequestMessage, ToolCallResultMessage
 from lemurian.session import Session
 from lemurian.state import State
+from lemurian.streaming import ToolCall, ToolCallAccumulator
 from lemurian.tools import HandoffResult, LLMRecoverableError
 
 logger = logging.getLogger(__name__)
@@ -15,17 +18,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RunResult:
-    """The result of a single Runner.run() invocation.
-
-    Args:
-        last_message: The final message appended to the transcript.
-        agent_name: Name of the agent that was executed.
-        hand_off: Set if a tool returned a HandoffResult, None otherwise.
-    """
+    """The result of a single Runner.run() invocation."""
 
     last_message: Message
     agent_name: str
     hand_off: HandoffResult | None = None
+
+
+@dataclass
+class _ToolOutcome:
+    """Result of executing a single tool call."""
+
+    output: str
+    is_error: bool
+    handoff: HandoffResult | None = None
 
 
 class Runner:
@@ -36,171 +42,90 @@ class Runner:
     It injects the system prompt at call time (never storing it in
     the transcript), dispatches tool calls, and detects handoffs.
 
+    ``run()`` drains ``iter()``.  ``iter()`` is the streaming entry point.
+
     Args:
         max_turns: Maximum number of provider round-trips before
             returning a timeout message.
     """
 
-    def __init__(self, max_turns: int = 50):
+    def __init__(
+        self,
+        max_turns: int = 50,
+        parallel_tool_calls: bool = True,
+    ):
         self.max_turns = max_turns
+        self.parallel_tool_calls = parallel_tool_calls
 
     async def run(
-        self,
-        agent: Agent,
-        session: Session,
-        state: State,
+        self, agent: Agent, session: Session, state: State,
         context_start: int = 0,
     ) -> RunResult:
-        """Run the agent loop until a final response or handoff.
+        """Run the agent loop until a final response or handoff."""
+        result: RunResult | None = None
+        async for event in self.iter(agent, session, state, context_start):
+            if isinstance(event, RunCompleteEvent):
+                result = event.result
+        if result is None:
+            raise RuntimeError("iter() ended without emitting RunCompleteEvent")
+        return result
 
-        Builds messages from ``session.transcript[context_start:]``
-        with the system prompt prepended. Executes tool calls,
-        appends results to the transcript, and returns when the
-        provider produces a text response or a tool triggers a handoff.
-
-        Args:
-            agent: The agent to execute.
-            session: The session containing the conversation transcript.
-            state: The application state passed to tools via Context.
-            context_start: Transcript index to start reading from.
-                Used by Swarm for fresh-context handoffs.
-
-        Returns:
-            A RunResult with the final message and optional handoff.
-        """
+    async def iter(
+        self, agent: Agent, session: Session, state: State,
+        context_start: int = 0,
+    ) -> AsyncIterator[StreamEvent]:
+        """Run the agent loop, yielding events as execution proceeds."""
         ctx = Context(session=session, state=state, agent=agent)
         tool_registry = agent.tool_registry
         tool_schemas = [t.model_dump() for t in tool_registry.values()]
 
-        for _ in range(self.max_turns):
-            # Build messages: system prompt + transcript window
-            transcript_window = session.transcript[context_start:]
+        for _turn in range(self.max_turns):
             messages = [
                 {"role": "system", "content": agent.system_prompt},
-                *[m.model_dump() for m in transcript_window],
+                *[m.model_dump() for m in session.transcript[context_start:]],
             ]
 
-            response = await agent.provider.complete(
-                model=agent.model,
-                messages=messages,
+            # Stream provider response
+            acc = ToolCallAccumulator()
+            full_content = ""
+            async for chunk in agent.provider.stream_complete(
+                model=agent.model, messages=messages,
                 tools=tool_schemas if tool_schemas else None,
+            ):
+                if chunk.content_delta:
+                    full_content += chunk.content_delta
+                    yield RawResponseEvent(content=chunk.content_delta)
+                if chunk.tool_call_fragments:
+                    for frag in chunk.tool_call_fragments:
+                        acc.feed(frag)
+
+            completed_calls = acc.finalize()
+
+            # No tool calls — final text response
+            if not completed_calls:
+                msg = Message(role=MessageRole.ASSISTANT, content=full_content)
+                session.transcript.append(msg)
+                yield RunItemEvent(name="message", data={"content": full_content})
+                yield RunCompleteEvent(result=RunResult(
+                    last_message=msg, agent_name=agent.name,
+                ))
+                return
+
+            # Execute tool calls
+            outcomes = await self._execute_tools(
+                completed_calls, tool_registry, ctx, session,
             )
-
-            # No tool calls — final assistant response
-            if not response.tool_calls:
-                assistant_msg = Message(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
-                )
-                session.transcript.append(assistant_msg)
-                return RunResult(
-                    last_message=assistant_msg,
-                    agent_name=agent.name,
-                    hand_off=None,
-                )
-
-            # Process tool calls
-            for tool_call in response.tool_calls:
-                if tool_call.type != "function":
-                    continue
-
-                # Append the tool call request to transcript
-                session.transcript.append(
-                    ToolCallRequestMessage(
-                        role=MessageRole.ASSISTANT,
-                        tool_calls=[tool_call],
-                    )
-                )
-
-                func_name = tool_call.function.name
-                call_id = tool_call.id
-
-                # Look up in resolved tool registry
-                tool_obj = tool_registry.get(func_name)
-                if tool_obj is None:
-                    logger.warning(f"Tool not found: {func_name}")
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=f"Error: tool '{func_name}' not found",
-                            tool_call_id=call_id,
-                        )
-                    )
-                    continue
-
-                # Parse arguments and inject context if needed
-                # TODO: Add self-healing for malformed tool calls — use a
-                # secondary model to repair the JSON or re-map arguments
-                # before falling back to the error path.
-                try:
-                    params = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError as e:
-                    logger.warning(
-                        f"Invalid JSON in arguments for {func_name}: {e}"
-                    )
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=f"Error: invalid arguments — {e}",
-                            tool_call_id=call_id,
-                        )
-                    )
-                    continue
-
-                logger.info(f"Calling {func_name} with {params}")
-
-                if "context" in inspect.signature(tool_obj.func).parameters:
-                    params["context"] = ctx
-
-                try:
-                    result = await tool_obj(**params)
-                except LLMRecoverableError as e:
-                    logger.info(
-                        f"Tool {func_name} requested retry: {e}"
-                    )
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=str(e),
-                            tool_call_id=call_id,
-                        )
-                    )
-                    continue
-                except Exception as e:
-                    logger.error(f"Tool {func_name} raised: {e}")
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=f"Error calling {func_name}: {e}",
-                            tool_call_id=call_id,
-                        )
-                    )
-                    continue
-
-                # Check for handoff
-                if isinstance(result.output, HandoffResult):
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=f"Transferring to {result.output.target_agent}",
-                            tool_call_id=call_id,
-                        )
-                    )
-                    return RunResult(
+            for tc, outcome in outcomes:
+                yield RunItemEvent(name="tool_call", data={
+                    "tool_name": tc.name, "call_id": tc.id,
+                    "output": outcome.output, "is_error": outcome.is_error,
+                })
+                if outcome.handoff is not None:
+                    yield RunCompleteEvent(result=RunResult(
                         last_message=session.transcript[-1],
-                        agent_name=agent.name,
-                        hand_off=result.output,
-                    )
-
-                # Normal tool result
-                output_str = json.dumps(result.output) if not isinstance(result.output, str) else result.output
-                session.transcript.append(
-                    ToolCallResultMessage(
-                        role=MessageRole.TOOL,
-                        content=output_str,
-                        tool_call_id=call_id,
-                    )
-                )
+                        agent_name=agent.name, hand_off=outcome.handoff,
+                    ))
+                    return
 
         # Max turns exceeded
         timeout_msg = Message(
@@ -208,8 +133,86 @@ class Runner:
             content="Maximum turns reached. Please try again.",
         )
         session.transcript.append(timeout_msg)
-        return RunResult(
-            last_message=timeout_msg,
-            agent_name=agent.name,
-            hand_off=None,
-        )
+        yield RunCompleteEvent(result=RunResult(
+            last_message=timeout_msg, agent_name=agent.name,
+        ))
+
+    # ------------------------------------------------------------------
+    # Tool execution
+    # ------------------------------------------------------------------
+
+    async def _execute_tools(
+        self, calls: list[ToolCall], tool_registry: dict,
+        ctx: Context, session: Session,
+    ) -> list[tuple[ToolCall, _ToolOutcome]]:
+        use_parallel = self.parallel_tool_calls and len(calls) > 1
+        if use_parallel:
+            return await self._execute_parallel(calls, tool_registry, ctx, session)
+        return await self._execute_sequential(calls, tool_registry, ctx, session)
+
+    async def _execute_sequential(self, calls, tool_registry, ctx, session):
+        results = []
+        for tc in calls:
+            session.transcript.append(ToolCallRequestMessage(
+                role=MessageRole.ASSISTANT, tool_calls=[tc],
+            ))
+            outcome = await self._execute_one(tc, tool_registry, ctx)
+            session.transcript.append(ToolCallResultMessage(
+                role=MessageRole.TOOL, content=outcome.output, tool_call_id=tc.id,
+            ))
+            results.append((tc, outcome))
+            if outcome.handoff is not None:
+                break
+        return results
+
+    async def _execute_parallel(self, calls, tool_registry, ctx, session):
+        # Record all tool-call requests up front (parallel batch semantics).
+        for tc in calls:
+            session.transcript.append(ToolCallRequestMessage(
+                role=MessageRole.ASSISTANT, tool_calls=[tc],
+            ))
+        # Execute sequentially so a handoff short-circuits remaining calls.
+        results: list[tuple[ToolCall, _ToolOutcome]] = []
+        for tc in calls:
+            outcome = await self._execute_one(tc, tool_registry, ctx)
+            session.transcript.append(ToolCallResultMessage(
+                role=MessageRole.TOOL, content=outcome.output, tool_call_id=tc.id,
+            ))
+            results.append((tc, outcome))
+            if outcome.handoff is not None:
+                break
+        return results
+
+    async def _execute_one(self, tc: ToolCall, tool_registry: dict, ctx: Context) -> _ToolOutcome:
+        tool_obj = tool_registry.get(tc.name)
+        if tool_obj is None:
+            logger.warning(f"Tool not found: {tc.name}")
+            return _ToolOutcome(output=f"Error: tool '{tc.name}' not found", is_error=True)
+
+        try:
+            params = json.loads(tc.arguments)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON in arguments for {tc.name}: {e}")
+            return _ToolOutcome(output=f"Error: invalid arguments — {e}", is_error=True)
+
+        logger.info(f"Calling {tc.name} with {params}")
+        if "context" in inspect.signature(tool_obj.func).parameters:
+            params["context"] = ctx
+
+        try:
+            result = await tool_obj(**params)
+        except LLMRecoverableError as e:
+            logger.info(f"Tool {tc.name} requested retry: {e}")
+            return _ToolOutcome(output=str(e), is_error=False)
+        except Exception as e:
+            logger.error(f"Tool {tc.name} raised: {e}")
+            return _ToolOutcome(output=f"Error calling {tc.name}: {e}", is_error=True)
+
+        if isinstance(result.output, HandoffResult):
+            return _ToolOutcome(
+                output=f"Transferring to {result.output.target_agent}",
+                is_error=False, handoff=result.output,
+            )
+
+        output_str = json.dumps(result.output) if not isinstance(result.output, str) else result.output
+        return _ToolOutcome(output=output_str, is_error=False)

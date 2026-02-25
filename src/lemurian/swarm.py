@@ -1,12 +1,14 @@
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from lemurian.agent import Agent
 from lemurian.capability import Capability
 from lemurian.context import Context
+from lemurian.events import RunCompleteEvent, RunItemEvent, StreamEvent
 from lemurian.message import Message, MessageRole
-from lemurian.runner import Runner
+from lemurian.runner import Runner, RunResult
 from lemurian.session import Session
 from lemurian.state import State
 from lemurian.tools import HandoffResult, Tool
@@ -185,83 +187,90 @@ class Swarm:
         resolved.capabilities = []  # prevent double-counting in tool_registry
         return resolved
 
-    async def run(self, user_message: str, agent: str | None = None) -> SwarmResult:
-        """Append a user message and run the agent loop.
-
-        On the first call, ``agent`` is required to set the initial
-        active agent. On subsequent calls, the Swarm continues with
-        the current active agent unless ``agent`` is specified.
-
-        Args:
-            user_message: The user's message to append to the transcript.
-            agent: Name of the agent to run. Required on first call,
-                optional thereafter.
-
-        Returns:
-            A SwarmResult with the final message, active agent, session,
-            and state.
-
-        Raises:
-            ValueError: If ``agent`` is not provided on the first call.
-        """
-        # First call — initialise session and active agent
+    def _init_session(self, user_message: str, agent: str | None) -> None:
+        """Set up session and active agent, append user message."""
         if self.session is None:
             if agent is None:
-                raise ValueError("agent must be specified on the first call to run()")
+                raise ValueError("agent must be specified on the first call")
             self.session = Session(session_id=str(uuid.uuid4()))
             self.active_agent_name = agent
             self.context_start = 0
         elif agent is not None:
             self.active_agent_name = agent
-
-        # Append user message to transcript
         self.session.transcript.append(
             Message(role=MessageRole.USER, content=user_message)
         )
 
+    async def run(self, user_message: str, agent: str | None = None) -> SwarmResult:
+        """Append a user message and run the agent loop."""
+        last_result = None
+        async for event in self.iter(user_message, agent):
+            if isinstance(event, RunCompleteEvent):
+                last_result = event.result
+        if last_result is None:
+            raise RuntimeError("iter() ended without emitting RunCompleteEvent")
         assert self.active_agent_name is not None
+        assert self.session is not None
+        return SwarmResult(
+            last_message=last_result.last_message,
+            active_agent=self.active_agent_name,
+            session=self.session,
+            state=self.state,
+        )
 
-        # Handoff loop
+    async def iter(
+        self, user_message: str, agent: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Streaming entry point. Yields events including handoffs."""
+        self._init_session(user_message, agent)
+        assert self.active_agent_name is not None
+        assert self.session is not None
+        session = self.session
         for _ in range(self.max_handoffs + 1):
             current_agent = self.agents[self.active_agent_name]
             resolved_agent = self._resolve_agent(current_agent)
 
-            result = await self.runner.run(
-                agent=resolved_agent,
-                session=self.session,
-                state=self.state,
-                context_start=self.context_start,
-            )
+            last_run_result = None
+            async for event in self.runner.iter(
+                agent=resolved_agent, session=session,
+                state=self.state, context_start=self.context_start,
+            ):
+                if isinstance(event, RunCompleteEvent):
+                    last_run_result = event.result
+                else:
+                    yield event
 
-            if result.hand_off is None:
-                return SwarmResult(
-                    last_message=result.last_message,
-                    active_agent=self.active_agent_name,
-                    session=self.session,
-                    state=self.state,
-                )
+            if last_run_result is None:
+                return
 
-            # Validate handoff target exists
-            target = result.hand_off.target_agent
+            if last_run_result.hand_off is None:
+                yield RunCompleteEvent(result=last_run_result)
+                return
+
+            # Validate handoff target
+            target = last_run_result.hand_off.target_agent
             if target not in self.agents:
                 logger.warning(f"Handoff target '{target}' not found")
                 error_msg = Message(
                     role=MessageRole.ASSISTANT,
                     content=f"Error: agent '{target}' not found.",
                 )
-                self.session.transcript.append(error_msg)
-                return SwarmResult(
+                session.transcript.append(error_msg)
+                yield RunCompleteEvent(result=RunResult(
                     last_message=error_msg,
-                    active_agent=self.active_agent_name,
-                    session=self.session,
-                    state=self.state,
-                )
+                    agent_name=self.active_agent_name,
+                ))
+                return
 
-            # Handoff occurred — append handoff message as user context for new agent
-            self.session.transcript.append(
-                Message(role=MessageRole.USER, content=result.hand_off.message)
+            # Handoff
+            yield RunItemEvent(
+                name="handoff",
+                data={"target_agent": target, "message": last_run_result.hand_off.message},
             )
-            self.context_start = len(self.session.transcript) - 1
+            session.transcript.append(
+                Message(role=MessageRole.USER, content=last_run_result.hand_off.message)
+            )
+            self.context_start = len(session.transcript) - 1
             self.active_agent_name = target
             logger.info(f"Handoff to {self.active_agent_name} at context_start={self.context_start}")
 
@@ -270,10 +279,8 @@ class Swarm:
             role=MessageRole.ASSISTANT,
             content="Maximum handoffs exceeded. Please try again.",
         )
-        self.session.transcript.append(error_msg)
-        return SwarmResult(
+        session.transcript.append(error_msg)
+        yield RunCompleteEvent(result=RunResult(
             last_message=error_msg,
-            active_agent=self.active_agent_name,
-            session=self.session,
-            state=self.state,
-        )
+            agent_name=self.active_agent_name,
+        ))

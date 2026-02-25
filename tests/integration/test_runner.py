@@ -15,20 +15,11 @@ from tests.conftest import (
     MockFunction,
     MockResponse,
     MockToolCall,
+    echo,
     make_multi_tool_call_response,
     make_text_response,
     make_tool_call_response,
 )
-
-
-# ---------------------------------------------------------------------------
-# Tool fixtures (module-level, reused across test classes)
-# ---------------------------------------------------------------------------
-
-@tool
-def echo(text: str):
-    """Echo text back."""
-    return text
 
 
 @tool
@@ -434,10 +425,10 @@ class TestRunnerMultiToolCall:
         assert tool_results[1].tool_call_id == "call_bbb"
 
     @pytest.mark.asyncio
-    async def test_handoff_in_batch_stops_remaining_calls(
+    async def test_handoff_in_batch_stops_remaining_calls_sequential(
         self, make_agent, mock_provider
     ):
-        """A handoff mid-batch prevents later tool calls from running."""
+        """With sequential execution, a handoff stops remaining calls."""
         call_log = []
 
         @tool
@@ -456,22 +447,55 @@ class TestRunnerMultiToolCall:
 
         mock_provider.responses = [
             make_multi_tool_call_response([
-                (
-                    "trigger_handoff",
-                    {"target": "billing"},
-                    "call_1",
-                ),
-                (
-                    "track_call",
-                    {"label": "should_not_run"},
-                    "call_2",
-                ),
+                ("trigger_handoff", {"target": "billing"}, "call_1"),
+                ("track_call", {"label": "should_not_run"}, "call_2"),
             ]),
         ]
         agent = make_agent(tools=[track_call, trigger_handoff])
         session = Session(session_id="s1")
 
-        result = await Runner().run(agent, session, State())
+        result = await Runner(parallel_tool_calls=False).run(
+            agent, session, State(),
+        )
+
+        assert result.hand_off is not None
+        assert result.hand_off.target_agent == "billing"
+        assert "handoff" in call_log
+        assert "should_not_run" not in call_log
+
+    @pytest.mark.asyncio
+    async def test_handoff_in_batch_detected_with_parallel(
+        self, make_agent, mock_provider
+    ):
+        """With parallel execution, handoff short-circuits remaining tools."""
+        call_log = []
+
+        @tool
+        def track_call(label: str):
+            """Tracks that it was called."""
+            call_log.append(label)
+            return f"tracked: {label}"
+
+        @tool
+        def trigger_handoff(context: Context, target: str):
+            """Triggers a handoff."""
+            call_log.append("handoff")
+            return HandoffResult(
+                target_agent=target, message="handing off"
+            )
+
+        mock_provider.responses = [
+            make_multi_tool_call_response([
+                ("trigger_handoff", {"target": "billing"}, "call_1"),
+                ("track_call", {"label": "should_not_run"}, "call_2"),
+            ]),
+        ]
+        agent = make_agent(tools=[track_call, trigger_handoff])
+        session = Session(session_id="s1")
+
+        result = await Runner(parallel_tool_calls=True).run(
+            agent, session, State(),
+        )
 
         assert result.hand_off is not None
         assert result.hand_off.target_agent == "billing"
