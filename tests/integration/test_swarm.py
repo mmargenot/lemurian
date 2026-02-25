@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from lemurian.agent import Agent
 from lemurian.capability import Capability
 from lemurian.context import Context
+from lemurian.handoff import handoff
 from lemurian.message import MessageRole
 from lemurian.session import Session
 from lemurian.state import State
@@ -70,7 +71,6 @@ class TestSwarmLifecycle:
             make_text_response("From A"),
             make_text_response("From B"),
         ]
-        from lemurian.agent import Agent
 
         a = Agent(
             name="a", system_prompt="A", model="m",
@@ -90,7 +90,7 @@ class TestSwarmLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Single-agent swarm — no handoff tool injected
+# Single-agent swarm — no handoff tools
 # ---------------------------------------------------------------------------
 
 class TestSwarmSingleAgent:
@@ -108,25 +108,24 @@ class TestSwarmSingleAgent:
 
 
 # ---------------------------------------------------------------------------
-# Handoff tool generation
+# Handoff resolution
 # ---------------------------------------------------------------------------
 
-class TestHandoffTool:
-    def test_schema_excludes_current_agent(self, make_agent):
-        a = make_agent(name="triage", description="Routes")
-        b = make_agent(name="billing", description="Bills")
-        c = make_agent(name="support", description="Helps")
-        swarm = Swarm(agents=[a, b, c])
+class TestHandoffResolution:
+    def test_resolve_handoffs_from_agent(self, make_agent):
+        billing_ho = handoff("billing", "Bills")
+        support_ho = handoff("support", "Helps")
+        a = make_agent(
+            name="triage",
+            handoffs=[billing_ho, support_ho],
+        )
+        swarm = Swarm(agents=[a])
 
-        ht = swarm._create_handoff_tool("triage")
-        schema = ht.model_dump()
-        enum = schema["function"]["parameters"]["properties"][
-            "agent_name"
-        ]["enum"]
+        resolved = swarm._resolve_handoffs(a)
 
-        assert "triage" not in enum
-        assert "billing" in enum
-        assert "support" in enum
+        assert len(resolved) == 2
+        assert resolved[0].tool_name == "transfer_to_billing"
+        assert resolved[1].tool_name == "transfer_to_support"
 
     def test_resolve_agent_independent_copy(self, make_agent):
         a = make_agent(name="a")
@@ -135,7 +134,7 @@ class TestHandoffTool:
 
         resolved = swarm._resolve_agent(a)
 
-        assert len(resolved.tools) == 1  # handoff tool
+        assert len(resolved.tools) == 0
         assert len(a.tools) == 0  # original unchanged
 
 
@@ -148,25 +147,22 @@ class TestSwarmHandoff:
     async def test_handoff_switches_agent(self):
         """Triage hands off to billing, billing responds."""
         provider = MockProvider()
-        from lemurian.agent import Agent
 
-        triage = Agent(
-            name="triage", description="Routes",
-            system_prompt="Route.", model="m", provider=provider,
-        )
         billing = Agent(
             name="billing", description="Bills",
             system_prompt="Bill.", model="m", provider=provider,
+        )
+        triage = Agent(
+            name="triage", description="Routes",
+            system_prompt="Route.", model="m", provider=provider,
+            handoffs=[handoff("billing", "Bills")],
         )
         swarm = Swarm(agents=[triage, billing])
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "billing",
-                    "message": "Customer needs billing help",
-                },
+                "transfer_to_billing",
+                {"message": "Customer needs billing help"},
             ),
             make_text_response("I can help with your bill."),
         ]
@@ -192,13 +188,13 @@ class TestSwarmHandoff:
 
     @pytest.mark.asyncio
     async def test_handoff_to_nonexistent_agent(self):
-        """Handoff to an unregistered agent returns an error message."""
+        """Handoff to an unregistered agent returns an error."""
         provider = MockProvider()
-        from lemurian.agent import Agent
 
         a = Agent(
             name="a", description="A",
             system_prompt="A.", model="m", provider=provider,
+            handoffs=[handoff("ghost", "Does not exist")],
         )
         b = Agent(
             name="b", description="B",
@@ -206,11 +202,10 @@ class TestSwarmHandoff:
         )
         swarm = Swarm(agents=[a, b])
 
-        # The LLM hallucinates a handoff to an agent that doesn't exist
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "ghost", "message": "go to ghost"},
+                "transfer_to_ghost",
+                {"message": "go to ghost"},
             ),
         ]
 
@@ -222,30 +217,31 @@ class TestSwarmHandoff:
     @pytest.mark.asyncio
     async def test_max_handoffs_exceeded(self):
         provider = MockProvider()
-        from lemurian.agent import Agent
 
         a = Agent(
             name="a", description="A", system_prompt="A.",
             model="m", provider=provider,
+            handoffs=[handoff("b", "B")],
         )
         b = Agent(
             name="b", description="B", system_prompt="B.",
             model="m", provider=provider,
+            handoffs=[handoff("a", "A")],
         )
         swarm = Swarm(agents=[a, b], max_handoffs=2)
 
         provider.responses = [
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "go to b"},
+                "transfer_to_b",
+                {"message": "go to b"},
             ),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "a", "message": "go to a"},
+                "transfer_to_a",
+                {"message": "go to a"},
             ),
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "b", "message": "go to b again"},
+                "transfer_to_b",
+                {"message": "go to b again"},
             ),
         ]
 
@@ -316,6 +312,7 @@ class TestSwarmStatePersistence:
             name="writer", description="Writes notes",
             system_prompt="Write.", model="m",
             provider=provider, tools=[add_note],
+            handoffs=[handoff("reader", "Reads notes")],
         )
         reader = Agent(
             name="reader", description="Reads notes",
@@ -332,11 +329,8 @@ class TestSwarmStatePersistence:
             ),
             # Writer hands off to reader
             make_tool_call_response(
-                "handoff",
-                {
-                    "agent_name": "reader",
-                    "message": "Read the notes",
-                },
+                "transfer_to_reader",
+                {"message": "Read the notes"},
             ),
             # Reader reads notes
             make_tool_call_response("read_notes", {}),
@@ -629,7 +623,6 @@ class TestSwarmResolveCapabilities:
         assert "greet" in tool_names
         assert "raven" in tool_names
         assert "annabel" in tool_names
-        assert "handoff" in tool_names
 
     def test_resolve_multiple_swarm_caps_on_same_agent(
         self, make_agent, cap_tool_raven, cap_tool_lenore
@@ -681,11 +674,11 @@ class TestSwarmResolveCapabilities:
         resolved = swarm._resolve_agent(montresor)
         tool_names = [t.name for t in resolved.tools]
         assert "raven" in tool_names
-        assert "handoff" not in tool_names
 
-    def test_resolve_multi_agent_includes_handoff_with_caps(
+    def test_resolve_multi_agent_caps_no_auto_handoff(
         self, make_agent, cap_tool_raven
     ):
+        """Handoffs are no longer injected as tools by _resolve_agent."""
         montresor = make_agent(name="montresor")
         usher = make_agent(name="usher")
         swarm = Swarm(agents=[montresor, usher])
@@ -696,7 +689,8 @@ class TestSwarmResolveCapabilities:
         resolved = swarm._resolve_agent(montresor)
         tool_names = [t.name for t in resolved.tools]
         assert "raven" in tool_names
-        assert "handoff" in tool_names
+        # _resolve_agent no longer injects handoff tools
+        assert "handoff" not in tool_names
 
     def test_resolve_duplicate_cap_on_agent_and_swarm_raises(
         self, make_agent, cap_tool_raven
@@ -759,20 +753,32 @@ class TestSwarmResolveDuplicateDetection:
         with pytest.raises(ValueError, match="Duplicate tool name"):
             swarm._resolve_agent(montresor)
 
-    def test_cap_tool_named_handoff_collides(self, make_agent):
-        """A capability tool named 'handoff' collides with the
-        injected handoff tool in a multi-agent swarm."""
+    @pytest.mark.asyncio
+    async def test_handoff_tool_name_collides_with_regular_tool(
+        self, make_agent, mock_provider
+    ):
+        """A regular tool named 'transfer_to_billing' collides with
+        a handoff to billing."""
         @tool
-        def handoff():
-            """In pace requiescat!"""
-            return "The thousand injuries of Fortunato I had borne"
-        cap = MockCapability(name="black_cat", tool_list=[handoff])
-        montresor = make_agent(name="montresor")
-        usher = make_agent(name="usher")
-        swarm = Swarm(agents=[montresor, usher])
-        swarm.add_capability(cap, agents=["montresor"])
-        with pytest.raises(ValueError, match="Duplicate tool name"):
-            swarm._resolve_agent(montresor)
+        def transfer_to_billing():
+            """Fake transfer."""
+            return "not a real handoff"
+
+        billing_ho = handoff("billing", "Bills")
+        montresor = make_agent(
+            name="montresor",
+            tools=[transfer_to_billing],
+            handoffs=[billing_ho],
+        )
+        mock_provider.responses = [
+            make_text_response("never reached"),
+        ]
+        swarm = Swarm(agents=[montresor])
+
+        with pytest.raises(
+            ValueError, match="collides with an existing tool"
+        ):
+            await swarm.run("hello", agent="montresor")
 
 
 # ---------------------------------------------------------------------------
@@ -940,13 +946,8 @@ class TestSwarmCapabilityEndToEnd:
 # ---------------------------------------------------------------------------
 
 class TestSwarmCapabilityStateIntegration:
-    """Tests that validate capability state patterns: self-contained
-    agent-level tools, app-level state init for cross-capability sharing,
-    and state mutation via swarm-level tools."""
-
     @pytest.mark.asyncio
     async def test_agent_level_cap_tools_self_contained(self):
-        """Agent-level capability tools work via closures without on_attach."""
         catalog = {"isbn-1": {"title": "The Raven", "author": "Poe"}}
 
         class SelfContainedCap(Capability):
@@ -987,7 +988,6 @@ class TestSwarmCapabilityStateIntegration:
 
     @pytest.mark.asyncio
     async def test_agent_level_cap_on_attach_not_called(self):
-        """Swarm.__init__ does NOT call on_attach for agent-level caps."""
         cap = MockCapability(name="raven")
         agent = Agent(
             name="montresor",
@@ -1001,8 +1001,6 @@ class TestSwarmCapabilityStateIntegration:
 
     @pytest.mark.asyncio
     async def test_swarm_level_on_attach_populates_state(self):
-        """Swarm-level on_attach writes to state; another agent reads it."""
-
         class ShopState(State):
             catalog: dict[str, str] = {}
 
@@ -1048,9 +1046,6 @@ class TestSwarmCapabilityStateIntegration:
 
     @pytest.mark.asyncio
     async def test_cross_capability_state_sharing_via_handoff(self):
-        """Agent A mutates state via a tool, hands off to Agent B whose
-        tool reads the mutated state — the bookshop pattern."""
-
         class SharedState(State):
             catalog: dict[str, str] = {}
 
@@ -1070,6 +1065,7 @@ class TestSwarmCapabilityStateIntegration:
             name="montresor", description="Adds books",
             system_prompt="For the love of God, Montresor!",
             model="m", provider=provider, tools=[add_book],
+            handoffs=[handoff("usher", "Reads catalog")],
         )
         reader = Agent(
             name="usher", description="Reads catalog",
@@ -1080,17 +1076,14 @@ class TestSwarmCapabilityStateIntegration:
         swarm = Swarm(agents=[writer, reader], state=state)
 
         provider.responses = [
-            # Writer adds a book
             make_tool_call_response(
                 "add_book",
                 {"isbn": "isbn-1", "title": "The Raven"},
             ),
-            # Writer hands off to reader
             make_tool_call_response(
-                "handoff",
-                {"agent_name": "usher", "message": "Check the catalog"},
+                "transfer_to_usher",
+                {"message": "Check the catalog"},
             ),
-            # Reader reads catalog
             make_tool_call_response("read_catalog", {}),
             make_text_response("I see The Raven"),
         ]
@@ -1107,10 +1100,6 @@ class TestSwarmCapabilityStateIntegration:
 
     @pytest.mark.asyncio
     async def test_swarm_cap_mutates_state_visible_to_agent_cap(self):
-        """A swarm-level capability tool writes to shared state, and an
-        agent-level capability tool (via closure over state) can observe
-        the change on a subsequent turn."""
-
         class InventoryState(State):
             orders: list[str] = []
 

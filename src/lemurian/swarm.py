@@ -4,12 +4,11 @@ from dataclasses import dataclass
 
 from lemurian.agent import Agent
 from lemurian.capability import Capability
-from lemurian.context import Context
+from lemurian.handoff import Handoff
 from lemurian.message import Message, MessageRole
 from lemurian.runner import Runner
 from lemurian.session import Session
 from lemurian.state import State
-from lemurian.tools import HandoffResult, Tool
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +31,13 @@ class SwarmResult:
 
 
 class Swarm:
-    """Multi-agent orchestrator with dynamic handoffs.
+    """Multi-agent orchestrator with explicit handoffs.
 
-    Manages a registry of agents and a single shared session. On each
-    ``run()`` call, the Swarm injects a ``handoff`` tool into the active
-    agent and runs the Runner. If a handoff occurs, the Swarm advances
-    the context window and switches to the target agent.
+    Manages a registry of agents and a single shared session.  On each
+    ``run()`` call the Swarm resolves the active agent's tools and
+    handoffs, then delegates to the Runner.  If the Runner reports a
+    handoff, the Swarm advances the context window and switches to the
+    target agent.
 
     Stateful across ``run()`` calls — the same session and state persist.
 
@@ -55,7 +55,9 @@ class Swarm:
         runner: Runner | None = None,
         max_handoffs: int = 10,
     ):
-        self.agents: dict[str, Agent] = {a.name: a for a in agents}
+        self.agents: dict[str, Agent] = {
+            a.name: a for a in agents
+        }
         self.state = state or State()
         self.runner = runner or Runner()
         self.max_handoffs = max_handoffs
@@ -65,51 +67,6 @@ class Swarm:
 
         self._capabilities: dict[str, Capability] = {}
         self._agent_capabilities: dict[str, set[str]] = {}
-
-    def _create_handoff_tool(self, current_agent_name: str) -> Tool:
-        """Create a handoff tool excluding the current agent from the enum.
-
-        Args:
-            current_agent_name: The active agent to exclude from the
-                list of available handoff targets.
-
-        Returns:
-            A Tool whose schema includes an enum of other agent names.
-        """
-        available = {
-            name: agent.description
-            for name, agent in self.agents.items()
-            if name != current_agent_name
-        }
-        agent_names = list(available.keys())
-        agent_info = ", ".join(
-            f"{name} ({desc})" if desc else name
-            for name, desc in available.items()
-        )
-
-        def handoff_func(context: Context, agent_name: str, message: str) -> HandoffResult:
-            return HandoffResult(target_agent=agent_name, message=message)
-
-        return Tool(
-            func=handoff_func,
-            name="handoff",
-            description=f"Hand off the conversation to another agent. Available: {agent_info}",
-            parameters_schema={
-                "type": "object",
-                "properties": {
-                    "agent_name": {
-                        "type": "string",
-                        "enum": agent_names,
-                        "description": "The agent to transfer to",
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Summary of context and instructions for the next agent",
-                    },
-                },
-                "required": ["agent_name", "message"],
-            },
-        )
 
     def add_capability(
         self,
@@ -125,20 +82,29 @@ class Swarm:
                 currently in the swarm.
 
         Raises:
-            ValueError: If any name in *agents* is not a registered agent.
+            ValueError: If any name in *agents* is not a registered
+                agent.
         """
-        targets = agents if agents is not None else list(self.agents.keys())
+        targets = (
+            agents
+            if agents is not None
+            else list(self.agents.keys())
+        )
         for name in targets:
             if name not in self.agents:
-                raise ValueError(f"Agent '{name}' not found in swarm")
+                raise ValueError(
+                    f"Agent '{name}' not found in swarm"
+                )
 
         self._capabilities[capability.name] = capability
         for name in targets:
-            self._agent_capabilities.setdefault(name, set()).add(capability.name)
+            self._agent_capabilities.setdefault(
+                name, set()
+            ).add(capability.name)
             capability.on_attach(self.state)
 
     def remove_capability(self, capability_name: str) -> None:
-        """Remove a capability from the swarm and all agent assignments.
+        """Remove a capability from the swarm and all assignments.
 
         Args:
             capability_name: Name of the capability to remove.
@@ -151,64 +117,85 @@ class Swarm:
         for agent_caps in self._agent_capabilities.values():
             agent_caps.discard(capability_name)
 
+    def _resolve_handoffs(
+        self, agent: Agent
+    ) -> list[Handoff]:
+        """Return the agent's declared handoffs."""
+        return list(agent.handoffs)
+
     def _resolve_agent(self, agent: Agent) -> Agent:
         """Return a copy of *agent* with all tools resolved.
 
-        Merges the agent's own tool registry (which includes agent-level
-        capability tools), swarm-level capability tools assigned to this
-        agent, and the handoff tool (when multiple agents exist).
+        Merges the agent's own tool registry (which includes
+        agent-level capability tools) and swarm-level capability
+        tools assigned to this agent.
 
         Raises:
             ValueError: If any two tools share the same name.
         """
         resolved = agent.model_copy()
 
-        # Start from the agent's full tool registry (own tools + agent-level capabilities)
+        # Start from the agent's full tool registry
         all_tools = list(agent.tool_registry.values())
 
-        # Add swarm-level capability tools assigned to this agent
-        for cap_name in self._agent_capabilities.get(agent.name, set()):
-            all_tools.extend(self._capabilities[cap_name].tools())
-
-        # Add handoff tool if multiple agents
-        if len(self.agents) > 1:
-            all_tools.append(self._create_handoff_tool(agent.name))
+        # Add swarm-level capability tools
+        for cap_name in self._agent_capabilities.get(
+            agent.name, set()
+        ):
+            all_tools.extend(
+                self._capabilities[cap_name].tools()
+            )
 
         # Validate uniqueness
         seen: set[str] = set()
         for t in all_tools:
             if t.name in seen:
-                raise ValueError(f"Duplicate tool name: '{t.name}'")
+                raise ValueError(
+                    f"Duplicate tool name: '{t.name}'"
+                )
             seen.add(t.name)
 
         resolved.tools = all_tools
-        resolved.capabilities = []  # prevent double-counting in tool_registry
+        # Prevent double-counting in tool_registry
+        resolved.capabilities = []
         return resolved
 
-    async def run(self, user_message: str, agent: str | None = None) -> SwarmResult:
+    async def run(
+        self,
+        user_message: str,
+        agent: str | None = None,
+    ) -> SwarmResult:
         """Append a user message and run the agent loop.
 
         On the first call, ``agent`` is required to set the initial
-        active agent. On subsequent calls, the Swarm continues with
+        active agent.  On subsequent calls, the Swarm continues with
         the current active agent unless ``agent`` is specified.
 
         Args:
-            user_message: The user's message to append to the transcript.
-            agent: Name of the agent to run. Required on first call,
-                optional thereafter.
+            user_message: The user's message to append to the
+                transcript.
+            agent: Name of the agent to run.  Required on first
+                call, optional thereafter.
 
         Returns:
-            A SwarmResult with the final message, active agent, session,
-            and state.
+            A SwarmResult with the final message, active agent,
+            session, and state.
 
         Raises:
-            ValueError: If ``agent`` is not provided on the first call.
+            ValueError: If ``agent`` is not provided on the first
+                call, or if a handoff tool name collides with a
+                regular tool name.
         """
         # First call — initialise session and active agent
         if self.session is None:
             if agent is None:
-                raise ValueError("agent must be specified on the first call to run()")
-            self.session = Session(session_id=str(uuid.uuid4()))
+                raise ValueError(
+                    "agent must be specified on the first "
+                    "call to run()"
+                )
+            self.session = Session(
+                session_id=str(uuid.uuid4())
+            )
             self.active_agent_name = agent
             self.context_start = 0
         elif agent is not None:
@@ -216,21 +203,41 @@ class Swarm:
 
         # Append user message to transcript
         self.session.transcript.append(
-            Message(role=MessageRole.USER, content=user_message)
+            Message(
+                role=MessageRole.USER, content=user_message
+            )
         )
 
         assert self.active_agent_name is not None
 
         # Handoff loop
         for _ in range(self.max_handoffs + 1):
-            current_agent = self.agents[self.active_agent_name]
-            resolved_agent = self._resolve_agent(current_agent)
+            current_agent = self.agents[
+                self.active_agent_name
+            ]
+            resolved_agent = self._resolve_agent(
+                current_agent
+            )
+            handoffs = self._resolve_handoffs(current_agent)
+
+            # Validate no name collisions between tools and
+            # handoffs
+            tool_names = set(
+                resolved_agent.tool_registry.keys()
+            )
+            for h in handoffs:
+                if h.tool_name in tool_names:
+                    raise ValueError(
+                        f"Handoff tool name '{h.tool_name}' "
+                        "collides with an existing tool"
+                    )
 
             result = await self.runner.run(
                 agent=resolved_agent,
                 session=self.session,
                 state=self.state,
                 context_start=self.context_start,
+                handoffs=handoffs,
             )
 
             if result.hand_off is None:
@@ -244,10 +251,14 @@ class Swarm:
             # Validate handoff target exists
             target = result.hand_off.target_agent
             if target not in self.agents:
-                logger.warning(f"Handoff target '{target}' not found")
+                logger.warning(
+                    f"Handoff target '{target}' not found"
+                )
                 error_msg = Message(
                     role=MessageRole.ASSISTANT,
-                    content=f"Error: agent '{target}' not found.",
+                    content=(
+                        f"Error: agent '{target}' not found."
+                    ),
                 )
                 self.session.transcript.append(error_msg)
                 return SwarmResult(
@@ -257,18 +268,30 @@ class Swarm:
                     state=self.state,
                 )
 
-            # Handoff occurred — append handoff message as user context for new agent
+            # Handoff — append handoff message as user context
+            # for the new agent
             self.session.transcript.append(
-                Message(role=MessageRole.USER, content=result.hand_off.message)
+                Message(
+                    role=MessageRole.USER,
+                    content=result.hand_off.message,
+                )
             )
-            self.context_start = len(self.session.transcript) - 1
+            self.context_start = (
+                len(self.session.transcript) - 1
+            )
             self.active_agent_name = target
-            logger.info(f"Handoff to {self.active_agent_name} at context_start={self.context_start}")
+            logger.info(
+                f"Handoff to {self.active_agent_name} "
+                f"at context_start={self.context_start}"
+            )
 
         # Max handoffs exceeded
         error_msg = Message(
             role=MessageRole.ASSISTANT,
-            content="Maximum handoffs exceeded. Please try again.",
+            content=(
+                "Maximum handoffs exceeded. "
+                "Please try again."
+            ),
         )
         self.session.transcript.append(error_msg)
         return SwarmResult(

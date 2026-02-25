@@ -1,7 +1,6 @@
 import asyncio
 import inspect
 import json
-from dataclasses import dataclass
 from typing import Any, Callable, get_type_hints
 
 from docstring_parser import parse as parse_docstring
@@ -38,22 +37,6 @@ class LLMRecoverableError(Exception):
                 )
             return db.get(user_id)
     """
-
-
-@dataclass
-class HandoffResult:
-    """Returned by a tool to signal an agent handoff.
-
-    When the Runner detects a HandoffResult as a tool's output, it
-    stops execution and returns control to the Swarm for agent switching.
-
-    Args:
-        target_agent: Name of the agent to hand off to.
-        message: Context and instructions for the next agent.
-    """
-
-    target_agent: str
-    message: str
 
 
 # ---------------------------------------------------------------------------
