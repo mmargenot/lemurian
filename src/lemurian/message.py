@@ -35,17 +35,14 @@ class ToolCallRequestMessage(Message):
 
     @field_serializer("tool_calls")
     def serialize_tool_calls(self, tool_calls: list) -> list[dict]:
-        """Serialize provider tool call objects into OpenAI-compatible dicts."""
+        """Serialize ToolCall objects into OpenAI-compatible dicts."""
         return [
             {
-                "id": t.id,
+                "id": tc.id,
                 "type": "function",
-                "function": {
-                    "arguments": t.function.arguments,
-                    "name": t.function.name
-                }
+                "function": {"name": tc.name, "arguments": tc.arguments},
             }
-            for t in tool_calls
+            for tc in tool_calls
         ]
 
 

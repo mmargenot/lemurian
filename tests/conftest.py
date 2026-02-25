@@ -8,6 +8,7 @@ from lemurian.context import Context
 from lemurian.provider import ModelProvider
 from lemurian.agent import Agent
 from lemurian.state import State
+from lemurian.streaming import StreamChunk, ToolCallFragment
 from lemurian.tools import Tool, tool
 
 
@@ -48,6 +49,26 @@ class MockProvider(ModelProvider):
     async def complete(self, model, messages, tools=None):
         self.call_log.append({"messages": messages, "tools": tools})
         return self.responses.pop(0)
+
+    async def stream_complete(self, model, messages, tools=None):
+        self.call_log.append({"messages": messages, "tools": tools})
+        resp = self.responses.pop(0)
+        if resp.content:
+            yield StreamChunk(content_delta=resp.content)
+        if resp.tool_calls:
+            for i, tc in enumerate(resp.tool_calls):
+                if tc.type != "function":
+                    continue
+                yield StreamChunk(tool_call_fragments=[
+                    ToolCallFragment(
+                        index=i, call_id=tc.id,
+                        name=tc.function.name,
+                        arguments_delta=tc.function.arguments,
+                    ),
+                ])
+        yield StreamChunk(
+            finish_reason="tool_calls" if resp.tool_calls else "stop",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +148,12 @@ class MockCapability(Capability):
 
     def on_detach(self, state: State) -> None:
         self.detach_log.append(state)
+
+
+@tool
+def echo(text: str):
+    """Echo text back."""
+    return text
 
 
 @pytest.fixture
