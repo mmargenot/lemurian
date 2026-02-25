@@ -223,7 +223,7 @@ def tool(
     """
 
     def _wrap(fn: Callable) -> Tool:
-        tool_name = name or fn.__name__
+        tool_name = name or fn.__name__  # ty: ignore[unresolved-attribute]
         tool_description = description or fn.__doc__ or ""
         params_schema, _ = _build_parameters_schema(fn)
 

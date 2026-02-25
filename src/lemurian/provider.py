@@ -96,8 +96,8 @@ class OpenAIProvider(ModelProvider):
     ):
         response = await self.client.responses.parse(
             model=model,
-            input=messages,
-            text_format=response_model,
+            input=messages,  # type: ignore[arg-type]  # OpenAI SDK overloaded unions
+            text_format=response_model,  # type: ignore[arg-type]
         )
         return response.output_parsed
 
@@ -144,8 +144,8 @@ class OpenRouter(ModelProvider):
     ):
         response = await self.client.responses.parse(
             model=model,
-            input=messages,
-            text_format=response_model,
+            input=messages,  # type: ignore[arg-type]  # OpenAI SDK overloaded unions
+            text_format=response_model,  # type: ignore[arg-type]
         )
         return response.output_parsed
 
@@ -186,11 +186,11 @@ class VLLMProvider(ModelProvider):
     ):
         response = await self.client.beta.chat.completions.parse(
             model=model,
-            messages=messages,
-            response_format=response_model,
+            messages=messages,  # type: ignore[arg-type]  # OpenAI SDK overloaded unions
+            response_format=response_model,  # type: ignore[arg-type]
             extra_body=dict(guided_decoding_backend="outlines"),
         )
-        return response.output_parsed
+        return response.output_parsed  # type: ignore[attr-defined]
 
 
 class ModalVLLMProvider(ModelProvider):
@@ -256,8 +256,8 @@ class ModalVLLMProvider(ModelProvider):
     ):
         response = await self.client.beta.chat.completions.parse(
             model=model,
-            messages=messages,
-            response_format=response_model,
+            messages=messages,  # type: ignore[arg-type]  # OpenAI SDK overloaded unions
+            response_format=response_model,  # type: ignore[arg-type]
             extra_body=dict(guided_decoding_backend="outlines"),
         )
-        return response.output_parsed
+        return response.output_parsed  # type: ignore[attr-defined]

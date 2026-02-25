@@ -219,6 +219,8 @@ class Swarm:
             Message(role=MessageRole.USER, content=user_message)
         )
 
+        assert self.active_agent_name is not None
+
         # Handoff loop
         for _ in range(self.max_handoffs + 1):
             current_agent = self.agents[self.active_agent_name]
