@@ -39,5 +39,6 @@ venv/
 # PyPI configuration
 .pypirc
 
-# MkDocs
+# Docs
 site/
+docs/reference/

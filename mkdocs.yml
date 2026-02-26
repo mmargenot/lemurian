@@ -24,15 +24,11 @@ theme:
 
 nav:
   - Home: index.md
+  - Examples: examples/index.md
   - API Reference: reference/
 
 plugins:
   - search
-  - gen-files:
-      scripts:
-        - scripts/gen_ref_pages.py
-  - literate-nav:
-      nav_file: SUMMARY.md
   - mkdocstrings:
       default_handler: python
       handlers:
@@ -49,7 +45,12 @@ plugins:
 markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.snippets
   - admonition
   - pymdownx.details
   - toc:

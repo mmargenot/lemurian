@@ -1,3 +1,16 @@
+"""Local research agent with file search capability.
+
+Demonstrates:
+
+- Building a Capability with exact and semantic search over local files
+
+- OpenTelemetry tracing with ConsoleSpanExporter
+
+Usage:
+    Add OPENAI_API_KEY=sk-... to .env, then:
+    uv run --env-file=.env examples/local_research_agent.py
+"""
+
 from lemurian.agent import Agent
 from lemurian.capability import Capability
 from lemurian.message import Message, MessageRole
