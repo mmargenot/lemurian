@@ -83,7 +83,7 @@ async def main():
     session = Session(session_id=str(uuid.uuid4()))
     state = NoteState()
 
-    print("Note-taking assistant (Ctrl+C to quit)\n")
+    print("Note-taking Assistant)\n")
 
     while True:
         try:

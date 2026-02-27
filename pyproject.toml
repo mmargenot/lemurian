@@ -46,6 +46,14 @@ docs = [
     "mkdocs-literate-nav>=0.6",
     "griffe-pydantic>=1.0",
 ]
+examples = [
+    "bs4>=0.0.2",
+    "faiss-cpu>=1.13.2",
+    "numpy>=2.2.6",
+    "requests>=2.32.5",
+    "sentence-transformers>=5.2.3",
+    "transformers>=4.56.2",
+]
 
 [tool.ty.environment]
 python-version = "3.12"
