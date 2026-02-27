@@ -1,34 +1,49 @@
-"""Generate the code reference pages and navigation."""
+"""Generate the code reference pages.
+
+Standalone script — no mkdocs plugin dependencies. Run before building:
+
+    uv run python scripts/gen_ref_pages.py
+    uv run --group docs zensical build
+"""
 
 from pathlib import Path
+import shutil
 
-import mkdocs_gen_files
-
-nav = mkdocs_gen_files.Nav()
 root = Path(__file__).parent.parent
 src = root / "src"
+out = root / "docs" / "reference"
+
+# Clean and recreate
+if out.exists():
+    shutil.rmtree(out)
+out.mkdir(parents=True)
+
+modules = []
 
 for path in sorted(src.rglob("*.py")):
     module_path = path.relative_to(src).with_suffix("")
-    doc_path = path.relative_to(src).with_suffix(".md")
-    full_doc_path = Path("reference", doc_path)
+    parts = list(module_path.parts)
 
-    parts = tuple(module_path.parts)
+    if parts[-1] == "__main__":
+        continue
 
     if parts[-1] == "__init__":
         parts = parts[:-1]
-        doc_path = doc_path.with_name("index.md")
-        full_doc_path = full_doc_path.with_name("index.md")
-    elif parts[-1] == "__main__":
-        continue
+        doc_path = out / Path(*parts) / "index.md"
+    else:
+        doc_path = out / Path(*parts).with_suffix(".md")
+        modules.append((parts[-1], f"lemurian/{parts[-1]}.md"))
 
-    nav[parts] = doc_path.as_posix()
+    ident = ".".join(parts)
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
+    doc_path.write_text(f"::: {ident}\n")
 
-    with mkdocs_gen_files.open(full_doc_path, "w") as fd:
-        ident = ".".join(parts)
-        fd.write(f"::: {ident}")
+# Generate index with links to each module page
+lines = ["# API Reference\n"]
+for name, link in modules:
+    lines.append(f"- [`lemurian.{name}`]({link})")
 
-    mkdocs_gen_files.set_edit_path(full_doc_path, path.relative_to(root))
+index = out / "index.md"
+index.write_text("\n".join(lines) + "\n")
 
-with mkdocs_gen_files.open("reference/SUMMARY.md", "w") as nav_file:
-    nav_file.writelines(nav.build_literate_nav())
+print(f"Generated reference pages in {out.relative_to(root)}")
