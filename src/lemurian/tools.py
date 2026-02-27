@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import functools
 import inspect
 import json
 from typing import Any, Callable, get_type_hints
@@ -124,6 +126,44 @@ class Tool(BaseModel):
         else:
             result = self.func(**kwargs)
         return ToolCallResult(tool_name=self.name, output=result)
+
+    def bind(self, **kwargs) -> "Tool":
+        """Return a new Tool with parameters pre-filled and hidden from the schema.
+
+        Useful for wiring capability state into standalone tool functions::
+
+            @tool
+            def search(file_map: dict, keyword: str) -> list[str]:
+                \"\"\"Search files for a keyword.\"\"\"
+                ...
+
+            class MyCapability(Capability):
+                def tools(self):
+                    return [search.bind(file_map=self.file_map)]
+
+        The bound parameters are removed from the LLM-visible schema and
+        injected automatically when the tool is called.  Calls can be
+        chained: ``t.bind(a=1).bind(b=2)``.
+
+        Args:
+            **kwargs: Parameter names and values to bind.
+
+        Returns:
+            A new Tool with the bound parameters hidden from the schema.
+        """
+        new_func = functools.partial(self.func, **kwargs)
+        new_schema = copy.deepcopy(self.parameters_schema)
+        for param_name in kwargs:
+            new_schema["properties"].pop(param_name, None)
+            if param_name in new_schema.get("required", []):
+                new_schema["required"].remove(param_name)
+
+        return Tool(
+            func=new_func,
+            name=self.name,
+            description=self.description,
+            parameters_schema=new_schema,
+        )
 
 
 # ---------------------------------------------------------------------------

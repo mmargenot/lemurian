@@ -1,8 +1,8 @@
 """Capability example: a SQLite-backed knowledge base.
 
 Demonstrates what makes a good Capability:
-- Encapsulates a real resource (SQLite database connection)
-- Provides a cohesive group of CRUD tools that close over the resource
+- Tools defined at module level with ``@tool`` and explicit resource parameters
+- Capability owns the resource (SQLite connection) and binds it into tools
 - Lifecycle hooks with real purpose (on_attach reports state, on_detach closes connection)
 - Fully self-contained — tools never reach into shared application state
 
@@ -23,6 +23,92 @@ from lemurian.tools import Tool, tool
 
 
 # ---------------------------------------------------------------------------
+# Tools (standalone, accept a connection parameter)
+# ---------------------------------------------------------------------------
+
+
+@tool
+def store_note(conn: sqlite3.Connection, topic: str, content: str):
+    """Store a note under a topic. Creates the topic if it doesn't exist."""
+    conn.execute(
+        "INSERT OR IGNORE INTO topics (name) VALUES (?)", (topic,)
+    )
+    conn.execute(
+        """
+        INSERT INTO notes (topic_id, content)
+        VALUES ((SELECT id FROM topics WHERE name = ?), ?)
+        """,
+        (topic, content),
+    )
+    conn.commit()
+    return f"Stored note under '{topic}'."
+
+
+@tool
+def get_notes(conn: sqlite3.Connection, topic: str):
+    """List all notes under a specific topic."""
+    rows = conn.execute(
+        """
+        SELECT n.content, n.created_at
+        FROM notes n
+        JOIN topics t ON n.topic_id = t.id
+        WHERE t.name = ?
+        ORDER BY n.created_at
+        """,
+        (topic,),
+    ).fetchall()
+    if not rows:
+        return f"No notes found under '{topic}'."
+    lines = [f"  - {content} ({created_at})" for content, created_at in rows]
+    return f"Notes under '{topic}':\n" + "\n".join(lines)
+
+
+@tool
+def search_notes(conn: sqlite3.Connection, query: str):
+    """Search notes by keyword across all topics."""
+    rows = conn.execute(
+        """
+        SELECT t.name, n.content
+        FROM notes n
+        JOIN topics t ON n.topic_id = t.id
+        WHERE n.content LIKE ? OR t.name LIKE ?
+        ORDER BY t.name, n.created_at
+        """,
+        (f"%{query}%", f"%{query}%"),
+    ).fetchall()
+    if not rows:
+        return "No matching notes found."
+    return "\n".join(f"[{topic}] {content}" for topic, content in rows)
+
+
+@tool
+def list_topics(conn: sqlite3.Connection):
+    """List all topics with their note counts."""
+    rows = conn.execute(
+        """
+        SELECT t.name, COUNT(n.id) as count
+        FROM topics t
+        LEFT JOIN notes n ON n.topic_id = t.id
+        GROUP BY t.id
+        ORDER BY t.name
+        """
+    ).fetchall()
+    if not rows:
+        return "No topics yet."
+    return "\n".join(f"  {name} ({count} notes)" for name, count in rows)
+
+
+@tool
+def delete_topic(conn: sqlite3.Connection, topic: str):
+    """Delete a topic and all its notes."""
+    cursor = conn.execute("DELETE FROM topics WHERE name = ?", (topic,))
+    conn.commit()
+    if cursor.rowcount == 0:
+        return f"No topic found named '{topic}'."
+    return f"Deleted topic '{topic}' and all its notes."
+
+
+# ---------------------------------------------------------------------------
 # Capability: Knowledge Base (SQLite-backed)
 # ---------------------------------------------------------------------------
 
@@ -31,7 +117,7 @@ class KnowledgeBaseCapability(Capability):
 
     Owns a SQLite connection with two tables: ``topics`` (named categories)
     and ``notes`` (content entries that belong to a topic via foreign key).
-    All tools close over the connection — no shared application state needed.
+    Tools are defined at module level and bound to the connection here.
 
     Args:
         db_path: Path to the SQLite database file, or ":memory:" for
@@ -59,85 +145,13 @@ class KnowledgeBaseCapability(Capability):
         self._conn.commit()
 
     def tools(self) -> list[Tool]:
-        conn = self._conn
-
-        @tool
-        def store_note(topic: str, content: str):
-            """Store a note under a topic. Creates the topic if it doesn't exist."""
-            conn.execute(
-                "INSERT OR IGNORE INTO topics (name) VALUES (?)", (topic,)
-            )
-            conn.execute(
-                """
-                INSERT INTO notes (topic_id, content)
-                VALUES ((SELECT id FROM topics WHERE name = ?), ?)
-                """,
-                (topic, content),
-            )
-            conn.commit()
-            return f"Stored note under '{topic}'."
-
-        @tool
-        def get_notes(topic: str):
-            """List all notes under a specific topic."""
-            rows = conn.execute(
-                """
-                SELECT n.content, n.created_at
-                FROM notes n
-                JOIN topics t ON n.topic_id = t.id
-                WHERE t.name = ?
-                ORDER BY n.created_at
-                """,
-                (topic,),
-            ).fetchall()
-            if not rows:
-                return f"No notes found under '{topic}'."
-            lines = [f"  - {content} ({created_at})" for content, created_at in rows]
-            return f"Notes under '{topic}':\n" + "\n".join(lines)
-
-        @tool
-        def search_notes(query: str):
-            """Search notes by keyword across all topics."""
-            rows = conn.execute(
-                """
-                SELECT t.name, n.content
-                FROM notes n
-                JOIN topics t ON n.topic_id = t.id
-                WHERE n.content LIKE ? OR t.name LIKE ?
-                ORDER BY t.name, n.created_at
-                """,
-                (f"%{query}%", f"%{query}%"),
-            ).fetchall()
-            if not rows:
-                return "No matching notes found."
-            return "\n".join(f"[{topic}] {content}" for topic, content in rows)
-
-        @tool
-        def list_topics():
-            """List all topics with their note counts."""
-            rows = conn.execute(
-                """
-                SELECT t.name, COUNT(n.id) as count
-                FROM topics t
-                LEFT JOIN notes n ON n.topic_id = t.id
-                GROUP BY t.id
-                ORDER BY t.name
-                """
-            ).fetchall()
-            if not rows:
-                return "No topics yet."
-            return "\n".join(f"  {name} ({count} notes)" for name, count in rows)
-
-        @tool
-        def delete_topic(topic: str):
-            """Delete a topic and all its notes."""
-            cursor = conn.execute("DELETE FROM topics WHERE name = ?", (topic,))
-            conn.commit()
-            if cursor.rowcount == 0:
-                return f"No topic found named '{topic}'."
-            return f"Deleted topic '{topic}' and all its notes."
-
-        return [store_note, get_notes, search_notes, list_topics, delete_topic]
+        return [
+            store_note.bind(conn=self._conn),
+            get_notes.bind(conn=self._conn),
+            search_notes.bind(conn=self._conn),
+            list_topics.bind(conn=self._conn),
+            delete_topic.bind(conn=self._conn),
+        ]
 
     def on_attach(self, state: State) -> None:
         topics = self._conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]

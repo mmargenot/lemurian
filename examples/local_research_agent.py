@@ -2,7 +2,9 @@
 
 Demonstrates:
 
-- Building a Capability with exact and semantic search over local files
+- Defining tools with ``@tool`` at module level (outside the Capability)
+
+- Wiring capability state into tools with ``Tool.bind()``
 
 - OpenTelemetry tracing with ConsoleSpanExporter
 
@@ -32,6 +34,112 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
 import faiss
+
+
+# ---------------------------------------------------------------------------
+# Tools (standalone, capability-agnostic)
+# ---------------------------------------------------------------------------
+
+
+@tool
+def exact_search_files(file_map: dict, keyword: str) -> list[str]:
+    """Search all files in our local knowledge base for an exact
+    keyword match. If the keyword is not found, returns nothing.
+    Collects filenames that can be loaded into memory using the
+    ``open_file`` tool.
+
+    Args:
+        file_map: Internal mapping of file names to file paths.
+        keyword: Keyword or topic to search the file system for
+            appearances.
+
+    Returns:
+        file_names: The names of files that contain the keyword.
+    """
+    file_names = []
+    for f_name, f_path in file_map.items():
+        with open(f_path, 'r') as f:
+            if keyword in f.read():
+                file_names.append(f_name)
+    return file_names
+
+
+@tool
+def semantic_search_files(
+        model: SentenceTransformer,
+        dim: int,
+        index_future: concurrent.futures.Future,
+        file_map: dict,
+        query: str,
+        k: int,
+        cutoff: float = 0.0,
+) -> list[str]:
+    """Searches vector embeddings of files in our local knowledge base
+    for a vector similarity match. Collects filenames that can be
+    loaded into memory using the ``open_file`` tool.
+
+    Args:
+        model: Sentence transformer model for encoding queries.
+        dim: Embedding dimension.
+        index_future: Future that resolves to the FAISS index.
+        file_map: Internal mapping of file names to file paths.
+        query: Search query for semantic search across files.
+        k: Number of results to return.
+        cutoff: Cutoff value for similarity search.
+            Defaults to 0, but can be set higher for more relevant
+            results.
+
+    Notes:
+        This tool is only useable if ``include_vectors = True`` when
+        the user set up the assistant.
+    """
+    if not index_future.done():
+        raise LLMRecoverableError(
+            "Vector index is still building. Use "
+            "``exact_search_files`` in the meantime."
+        )
+    index = index_future.result()
+    if not (cutoff >= 0.0 or cutoff < 1):
+        raise LLMRecoverableError(
+            "Cutoff must be within the range [0, 1)"
+        )
+    query_vector = model.encode(query)[None, :dim]
+    distances, indices = index.search(query_vector, k)
+    all_f_names = list(file_map.keys())
+    f_names = []
+    for d, i in zip(distances[0], indices[0]):
+        if d < cutoff:
+            continue
+        f_names.append(all_f_names[i])
+    return f_names
+
+
+@tool
+def open_file(file_map: dict, file_name: str) -> str:
+    """Open a file based on its file_name and read it into context.
+
+    Args:
+        file_map: Internal mapping of file names to file paths.
+        file_name: The name of the file in the internal mapping.
+
+    Returns:
+        content: Contents of the named file.
+    """
+    if file_name not in file_map:
+        raise LLMRecoverableError(
+            f"File '{file_name}' not found. Use ``exact_search_files`` "
+            "to find valid file names first."
+        )
+
+    with open(file_map[file_name], 'r') as f:
+        content = f.read()
+
+    return content
+
+
+# ---------------------------------------------------------------------------
+# Capability (owns resources, binds state into tools)
+# ---------------------------------------------------------------------------
 
 
 class ResearchCapability(Capability):
@@ -69,7 +177,7 @@ class ResearchCapability(Capability):
         filter_dir = [".DS_Store"]
         file_paths = []
         directories = [self.root]
-        
+
         while directories:
             curr_dir = directories.pop(0)
             if curr_dir.name in filter_dir:
@@ -102,7 +210,7 @@ class ResearchCapability(Capability):
 
     def initialize_vectors(self, model, dim: int):
         """
-        uses 
+        uses
         """
         index = faiss.IndexHNSWFlat(dim, 32)
         for _, f_path in self.file_map.items():
@@ -112,97 +220,21 @@ class ResearchCapability(Capability):
                 index.add(embedding[None, :dim])
         return index
 
-    def tools(self) -> list[Tool]: 
-        @tool
-        def exact_search_files(keyword: str) -> list[str]:
-            """Search all files in our local knowledge base for an exact
-            keyword match. If the keyword is not found, returns nothing.
-            Collects filenames that can be loaded into memory using the 
-            ``open_file`` tool.
-
-            Args:
-                keyword (str): Keyword or topic to search the file system for
-                    appearances.
-
-            Returns:
-                file_names (str): The names of files that contain the keyword.
-            """
-            file_names = []
-            for f_name, f_path in self.file_map.items():
-                with open(f_path, 'r') as f:
-                    if keyword in f.read():
-                        file_names.append(f_name)
-            return file_names
-
-        @tool
-        def semantic_search_files(
-                query: str,
-                k: int,
-                cutoff: float = 0.0
-        ) -> list[str]:
-            """Searches vector embeddings of files in our local knowledge base
-            for a vector similarity match. Collects filenames that can be
-            loaded into memory using the ``open_file`` tool.
-
-            Args:
-                query (str): Search query for semantic search across files.
-                k (int): Number of results to return.
-                cutoff (float, optional): Cutoff value for similarity search.
-                    Defaults to 0, but can be set higher for more relevant
-                    results.
-
-            Notes:
-                This tool is only useable if ``include_vectors = True`` when
-                the user set up the assistant.
-            """
-            if not self.include_vectors:
-                raise LLMRecoverableError(
-                    "Research agent was not created with "
-                    "``include_vectors = True``. If you want to use semantic"
-                    " search then that parameter has to be enabled. Default "
-                    "back to ``exact_search_files`` with appropriate keywords"
-                    " instead."
+    def tools(self) -> list[Tool]:
+        result = [
+            exact_search_files.bind(file_map=self.file_map),
+            open_file.bind(file_map=self.file_map),
+        ]
+        if self.include_vectors:
+            result.append(
+                semantic_search_files.bind(
+                    model=self.model,
+                    dim=self.dim,
+                    index_future=self._index_future,
+                    file_map=self.file_map,
                 )
-            if not self._index_future.done():
-                raise LLMRecoverableError(
-                    "Vector index is still building. Use "
-                    "``exact_search_files`` in the meantime."
-                )
-            index = self._index_future.result()
-            if not (cutoff >= 0.0 or cutoff < 1):
-                raise LLMRecoverableError(
-                    "Cutoff must be within the range [0, 1)"
-                )
-            query_vector = self.model.encode(query)[None, :self.dim]
-            distances, indices = index.search(query_vector, k)
-            all_f_names = list(self.file_map.keys())
-            f_names = []
-            for d, i in zip(distances[0], indices[0]):
-                if d < cutoff:
-                    continue
-                f_names.append(all_f_names[i])
-            return f_names
-
-        @tool
-        def open_file(file_name: str) -> str:
-            """Open a file based on its file_name and read it into context.
-
-            Args:
-                file_name (str): The name of the file in the internal mapping.
-
-            Returns:
-                content (str): Contents of the named file.
-            """
-            # check to confirm whether file is safe
-            if file_name not in self.file_map:
-                raise LLMRecoverableError("")
-
-            with open(self.file_map[file_name], 'r') as f:
-                content = f.read()
-
-            return content
-
-        return [exact_search_files, semantic_search_files, open_file]
+            )
+        return result
 
 
 provider = OpenAIProvider()
