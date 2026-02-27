@@ -177,8 +177,7 @@ assistant = Agent(
 async def main():
     swarm = Swarm(agents=[assistant])
 
-    print("Research assistant (Ctrl+C to quit)")
-    print("  Tools: store_note, get_notes, search_notes, list_topics, delete_topic")
+    print("Note-taking Assistant (with a DB)")
     print()
 
     first = True
