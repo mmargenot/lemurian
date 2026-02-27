@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from lemurian.agent import Agent
 from lemurian.context import Context
 from lemurian.handoff import Handoff, HandoffResult
+from lemurian.instrumentation import (
+    agent_span,
+    completion_span,
+    record_error,
+    record_usage,
+    tool_span,
+)
 from lemurian.message import (
     Message,
     MessageRole,
@@ -95,193 +102,240 @@ class Runner:
         tool_schemas = [
             t.model_dump() for t in tool_registry.values()
         ]
-        tool_schemas += [h.tool_schema() for h in (handoffs or [])]
+        tool_schemas += [
+            h.tool_schema() for h in (handoffs or [])
+        ]
+        system_name = getattr(
+            agent.provider, "system_name", "unknown"
+        )
 
-        for _ in range(self.max_turns):
-            # Build messages: system prompt + transcript window
-            transcript_window = session.transcript[context_start:]
-            messages = [
-                {"role": "system", "content": agent.system_prompt},
-                *[m.model_dump() for m in transcript_window],
-            ]
-
-            response = await agent.provider.complete(
-                model=agent.model,
-                messages=messages,
-                tools=tool_schemas if tool_schemas else None,
-            )
-
-            # No tool calls — final assistant response
-            if not response.tool_calls:
-                assistant_msg = Message(
-                    role=MessageRole.ASSISTANT,
-                    content=response.content,
+        async with agent_span(agent.name, agent.model):
+            for _ in range(self.max_turns):
+                # Build messages: system prompt + transcript window
+                transcript_window = (
+                    session.transcript[context_start:]
                 )
-                session.transcript.append(assistant_msg)
-                return RunResult(
-                    last_message=assistant_msg,
-                    agent_name=agent.name,
-                )
+                messages = [
+                    {
+                        "role": "system",
+                        "content": agent.system_prompt,
+                    },
+                    *[
+                        m.model_dump()
+                        for m in transcript_window
+                    ],
+                ]
 
-            # Process tool calls
-            for tool_call in response.tool_calls:
-                if tool_call.type != "function":
-                    continue
+                async with completion_span(
+                    system_name, agent.model
+                ) as c_span:
+                    response = await agent.provider.complete(
+                        model=agent.model,
+                        messages=messages,
+                        tools=(
+                            tool_schemas
+                            if tool_schemas
+                            else None
+                        ),
+                    )
+                    record_usage(
+                        c_span,
+                        response.usage,
+                        response.response_model,
+                    )
 
-                func_name = tool_call.function.name
-                call_id = tool_call.id
+                # No tool calls — final assistant response
+                if not response.tool_calls:
+                    assistant_msg = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=response.content,
+                    )
+                    session.transcript.append(assistant_msg)
+                    return RunResult(
+                        last_message=assistant_msg,
+                        agent_name=agent.name,
+                    )
 
-                # ----- Classify: handoff or regular tool? -----
-                if func_name in handoff_map:
-                    handoff_obj = handoff_map[func_name]
-                    try:
-                        args = json.loads(
-                            tool_call.function.arguments
+                # Process tool calls
+                for tool_call in response.tool_calls:
+                    if tool_call.type != "function":
+                        continue
+
+                    func_name = tool_call.function.name
+                    call_id = tool_call.id
+
+                    # ----- Classify: handoff or regular tool? -----
+                    if func_name in handoff_map:
+                        handoff_obj = handoff_map[func_name]
+                        try:
+                            args = json.loads(
+                                tool_call.function.arguments
+                            )
+                        except json.JSONDecodeError:
+                            args = {}
+                        message = args.get("message", "")
+
+                        session.transcript.append(
+                            ToolCallRequestMessage(
+                                role=MessageRole.ASSISTANT,
+                                tool_calls=[tool_call],
+                            )
                         )
-                    except json.JSONDecodeError:
-                        args = {}
-                    message = args.get("message", "")
+                        session.transcript.append(
+                            ToolCallResultMessage(
+                                role=MessageRole.TOOL,
+                                content=(
+                                    "Transferring to "
+                                    f"{handoff_obj.target_agent}"
+                                ),
+                                tool_call_id=call_id,
+                            )
+                        )
+                        return RunResult(
+                            last_message=(
+                                session.transcript[-1]
+                            ),
+                            agent_name=agent.name,
+                            hand_off=HandoffResult(
+                                target_agent=(
+                                    handoff_obj.target_agent
+                                ),
+                                message=message,
+                            ),
+                        )
 
+                    # ----- Regular tool execution -----
+
+                    # Append the tool call request to transcript
                     session.transcript.append(
                         ToolCallRequestMessage(
                             role=MessageRole.ASSISTANT,
                             tool_calls=[tool_call],
                         )
                     )
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=(
-                                "Transferring to "
-                                f"{handoff_obj.target_agent}"
-                            ),
-                            tool_call_id=call_id,
+
+                    # Look up in resolved tool registry
+                    tool_obj = tool_registry.get(func_name)
+                    if tool_obj is None:
+                        logger.warning(
+                            f"Tool not found: {func_name}"
                         )
-                    )
-                    return RunResult(
-                        last_message=session.transcript[-1],
-                        agent_name=agent.name,
-                        hand_off=HandoffResult(
-                            target_agent=(
-                                handoff_obj.target_agent
-                            ),
-                            message=message,
-                        ),
-                    )
-
-                # ----- Regular tool execution -----
-
-                # Append the tool call request to transcript
-                session.transcript.append(
-                    ToolCallRequestMessage(
-                        role=MessageRole.ASSISTANT,
-                        tool_calls=[tool_call],
-                    )
-                )
-
-                # Look up in resolved tool registry
-                tool_obj = tool_registry.get(func_name)
-                if tool_obj is None:
-                    logger.warning(
-                        f"Tool not found: {func_name}"
-                    )
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=(
-                                f"Error: tool '{func_name}' "
-                                "not found"
-                            ),
-                            tool_call_id=call_id,
+                        session.transcript.append(
+                            ToolCallResultMessage(
+                                role=MessageRole.TOOL,
+                                content=(
+                                    "Error: tool "
+                                    f"'{func_name}' "
+                                    "not found"
+                                ),
+                                tool_call_id=call_id,
+                            )
                         )
-                    )
-                    continue
+                        continue
 
-                # Parse arguments and inject context if needed
-                # TODO: Add self-healing for malformed tool
-                # calls — use a secondary model to repair the
-                # JSON or re-map arguments before falling back
-                # to the error path.
-                try:
-                    params = json.loads(
-                        tool_call.function.arguments
-                    )
-                except json.JSONDecodeError as e:
-                    logger.warning(
-                        "Invalid JSON in arguments for "
-                        f"{func_name}: {e}"
-                    )
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=(
-                                f"Error: invalid arguments — {e}"
-                            ),
-                            tool_call_id=call_id,
+                    # Parse arguments and inject context
+                    # TODO: Add self-healing for malformed
+                    # tool calls — use a secondary model to
+                    # repair the JSON or re-map arguments
+                    # before falling back to the error path.
+                    try:
+                        params = json.loads(
+                            tool_call.function.arguments
                         )
-                    )
-                    continue
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "Invalid JSON in arguments "
+                            f"for {func_name}: {e}"
+                        )
+                        session.transcript.append(
+                            ToolCallResultMessage(
+                                role=MessageRole.TOOL,
+                                content=(
+                                    "Error: invalid "
+                                    f"arguments — {e}"
+                                ),
+                                tool_call_id=call_id,
+                            )
+                        )
+                        continue
 
-                logger.info(
-                    f"Calling {func_name} with {params}"
-                )
-
-                if (
-                    "context"
-                    in inspect.signature(tool_obj.func).parameters
-                ):
-                    params["context"] = ctx
-
-                try:
-                    result = await tool_obj(**params)
-                except LLMRecoverableError as e:
                     logger.info(
-                        f"Tool {func_name} requested retry: {e}"
+                        f"Calling {func_name} with {params}"
+                    )
+
+                    if (
+                        "context"
+                        in inspect.signature(
+                            tool_obj.func
+                        ).parameters
+                    ):
+                        params["context"] = ctx
+
+                    async with tool_span(
+                        func_name, call_id
+                    ) as t_span:
+                        try:
+                            result = await tool_obj(
+                                **params
+                            )
+                        except LLMRecoverableError as e:
+                            record_error(t_span, e)
+                            logger.info(
+                                f"Tool {func_name} "
+                                f"requested retry: {e}"
+                            )
+                            session.transcript.append(
+                                ToolCallResultMessage(
+                                    role=MessageRole.TOOL,
+                                    content=str(e),
+                                    tool_call_id=call_id,
+                                )
+                            )
+                            continue
+                        except Exception as e:
+                            record_error(t_span, e)
+                            logger.error(
+                                "Tool "
+                                f"{func_name} raised: {e}"
+                            )
+                            session.transcript.append(
+                                ToolCallResultMessage(
+                                    role=MessageRole.TOOL,
+                                    content=(
+                                        "Error calling "
+                                        f"{func_name}: {e}"
+                                    ),
+                                    tool_call_id=call_id,
+                                )
+                            )
+                            continue
+
+                    # Normal tool result
+                    output_str = (
+                        json.dumps(result.output)
+                        if not isinstance(
+                            result.output, str
+                        )
+                        else result.output
                     )
                     session.transcript.append(
                         ToolCallResultMessage(
                             role=MessageRole.TOOL,
-                            content=str(e),
+                            content=output_str,
                             tool_call_id=call_id,
                         )
                     )
-                    continue
-                except Exception as e:
-                    logger.error(
-                        f"Tool {func_name} raised: {e}"
-                    )
-                    session.transcript.append(
-                        ToolCallResultMessage(
-                            role=MessageRole.TOOL,
-                            content=(
-                                f"Error calling {func_name}: {e}"
-                            ),
-                            tool_call_id=call_id,
-                        )
-                    )
-                    continue
 
-                # Normal tool result
-                output_str = (
-                    json.dumps(result.output)
-                    if not isinstance(result.output, str)
-                    else result.output
-                )
-                session.transcript.append(
-                    ToolCallResultMessage(
-                        role=MessageRole.TOOL,
-                        content=output_str,
-                        tool_call_id=call_id,
-                    )
-                )
-
-        # Max turns exceeded
-        timeout_msg = Message(
-            role=MessageRole.ASSISTANT,
-            content="Maximum turns reached. Please try again.",
-        )
-        session.transcript.append(timeout_msg)
-        return RunResult(
-            last_message=timeout_msg,
-            agent_name=agent.name,
-        )
+            # Max turns exceeded
+            timeout_msg = Message(
+                role=MessageRole.ASSISTANT,
+                content=(
+                    "Maximum turns reached. "
+                    "Please try again."
+                ),
+            )
+            session.transcript.append(timeout_msg)
+            return RunResult(
+                last_message=timeout_msg,
+                agent_name=agent.name,
+            )

@@ -5,7 +5,7 @@ import pytest
 
 from lemurian.capability import Capability
 from lemurian.context import Context
-from lemurian.provider import ModelProvider
+from lemurian.provider import CompletionResult, ModelProvider
 from lemurian.agent import Agent
 from lemurian.state import State
 from lemurian.tools import Tool, tool
@@ -28,12 +28,6 @@ class MockToolCall:
     function: MockFunction
 
 
-@dataclass
-class MockResponse:
-    content: str | None = None
-    tool_calls: list[MockToolCall] | None = None
-
-
 # ---------------------------------------------------------------------------
 # Mock provider
 # ---------------------------------------------------------------------------
@@ -41,8 +35,10 @@ class MockResponse:
 class MockProvider(ModelProvider):
     """Provider that returns pre-queued responses. No network calls."""
 
+    system_name: str = "mock"
+
     def __init__(self):
-        self.responses: list[MockResponse] = []
+        self.responses: list[CompletionResult] = []
         self.call_log: list[dict] = []
 
     async def complete(self, model, messages, tools=None):
@@ -54,9 +50,9 @@ class MockProvider(ModelProvider):
 # Response builder helpers
 # ---------------------------------------------------------------------------
 
-def make_text_response(content: str) -> MockResponse:
+def make_text_response(content: str) -> CompletionResult:
     """Fake provider response with text only (no tool calls)."""
-    return MockResponse(content=content)
+    return CompletionResult(content=content)
 
 
 def make_tool_call_response(
@@ -64,7 +60,7 @@ def make_tool_call_response(
     args: dict,
     call_id: str = "call_1",
     content: str | None = None,
-) -> MockResponse:
+) -> CompletionResult:
     """Fake provider response containing a single tool call."""
     tc = MockToolCall(
         id=call_id,
@@ -74,13 +70,13 @@ def make_tool_call_response(
             arguments=json.dumps(args),
         ),
     )
-    return MockResponse(content=content, tool_calls=[tc])
+    return CompletionResult(content=content, tool_calls=[tc])
 
 
 def make_multi_tool_call_response(
     calls: list[tuple[str, dict, str]],
     content: str | None = None,
-) -> MockResponse:
+) -> CompletionResult:
     """Fake provider response containing multiple tool calls.
 
     Each item in *calls* is ``(func_name, args_dict, call_id)``.
@@ -96,7 +92,7 @@ def make_multi_tool_call_response(
         )
         for name, args, call_id in calls
     ]
-    return MockResponse(content=content, tool_calls=tool_calls)
+    return CompletionResult(content=content, tool_calls=tool_calls)
 
 
 # ---------------------------------------------------------------------------

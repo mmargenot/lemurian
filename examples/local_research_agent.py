@@ -6,6 +6,7 @@ from lemurian.runner import Runner
 from lemurian.session import Session
 from lemurian.state import State
 from lemurian.tools import Tool, tool, LLMRecoverableError
+from lemurian.instrumentation import instrument, uninstrument
 
 import asyncio
 import concurrent.futures
@@ -212,6 +213,18 @@ local_research_agent = Agent(
 
 
 async def main():
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
+
+    tracer_provider = TracerProvider(
+        resource=Resource({SERVICE_NAME: "local-research-agent"})
+    )
+    tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(tracer_provider)
+
+    instrument()
     runner = Runner()
     session = Session(session_id=str(uuid.uuid4()))
     state = State()
@@ -232,6 +245,8 @@ async def main():
             agent=local_research_agent, session=session, state=state
         )
         print(f"Assistant: {result.last_message.content}\n")
+
+    uninstrument()
 
 
 if __name__ == "__main__":

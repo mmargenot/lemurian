@@ -1937,9 +1937,9 @@ class TestEdgeCases:
         and conversation continues."""
         from tests.conftest import (
             MockFunction,
-            MockResponse,
             MockToolCall,
         )
+        from lemurian.provider import CompletionResult
 
         provider = MockProvider()
 
@@ -1957,7 +1957,7 @@ class TestEdgeCases:
         )
         swarm = Swarm(agents=[agent])
 
-        bad_response = MockResponse(
+        bad_response = CompletionResult(
             tool_calls=[
                 MockToolCall(
                     id="call_bad",
