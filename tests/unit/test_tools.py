@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from lemurian.tools import (
@@ -326,3 +328,130 @@ class TestToolCall:
         result = await get_data()
         assert isinstance(result.output, dict)
         assert result.output["key"] == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Tool.bind — partial application with schema pruning
+# ---------------------------------------------------------------------------
+
+
+class TestToolBind:
+    def test_bind_removes_param_from_schema(self):
+        @tool
+        def search(db: str, query: str):
+            """Search."""
+            return f"{db}:{query}"
+
+        bound = search.bind(db="my_db")
+        schema = bound.model_dump()
+        props = schema["function"]["parameters"]["properties"]
+        assert "db" not in props
+        assert "query" in props
+
+    def test_bind_removes_param_from_required(self):
+        @tool
+        def search(db: str, query: str):
+            """Search."""
+            return f"{db}:{query}"
+
+        bound = search.bind(db="my_db")
+        required = bound.parameters_schema["required"]
+        assert "db" not in required
+        assert "query" in required
+
+    def test_bind_preserves_name_and_description(self):
+        @tool(name="custom_search", description="Custom desc")
+        def search(db: str, query: str):
+            """Search."""
+            return f"{db}:{query}"
+
+        bound = search.bind(db="my_db")
+        assert bound.name == "custom_search"
+        assert bound.description == "Custom desc"
+
+    @pytest.mark.asyncio
+    async def test_bound_tool_is_callable(self):
+        @tool
+        def search(db: str, query: str):
+            """Search."""
+            return f"{db}:{query}"
+
+        bound = search.bind(db="my_db")
+        result = await bound(query="hello")
+        assert result.tool_name == "custom_search" or result.tool_name == "search"
+        assert result.output == "my_db:hello"
+
+    @pytest.mark.asyncio
+    async def test_bound_tool_with_async_func(self):
+        @tool
+        async def fetch(base_url: str, path: str):
+            """Fetch a URL."""
+            return f"{base_url}/{path}"
+
+        bound = fetch.bind(base_url="https://example.com")
+        result = await bound(path="api/data")
+        assert result.output == "https://example.com/api/data"
+
+    def test_bind_does_not_mutate_original(self):
+        @tool
+        def search(db: str, query: str):
+            """Search."""
+            return f"{db}:{query}"
+
+        original_props = set(search.parameters_schema["properties"].keys())
+        _ = search.bind(db="my_db")
+        assert set(search.parameters_schema["properties"].keys()) == original_props
+
+    def test_chained_bind(self):
+        @tool
+        def query(db: str, table: str, column: str):
+            """Query a column."""
+            return f"{db}.{table}.{column}"
+
+        bound = query.bind(db="my_db").bind(table="users")
+        props = bound.parameters_schema["properties"]
+        assert "db" not in props
+        assert "table" not in props
+        assert "column" in props
+        assert bound.parameters_schema["required"] == ["column"]
+
+    @pytest.mark.asyncio
+    async def test_chained_bind_callable(self):
+        @tool
+        def query(db: str, table: str, column: str):
+            """Query a column."""
+            return f"{db}.{table}.{column}"
+
+        bound = query.bind(db="my_db").bind(table="users")
+        result = await bound(column="email")
+        assert result.output == "my_db.users.email"
+
+    def test_bind_with_context_param_preserved(self):
+        """Context parameter stays in the signature for runner injection."""
+
+        @tool
+        def stateful(context, db: str, query: str):
+            """Stateful search."""
+            return f"{db}:{query}"
+
+        bound = stateful.bind(db="my_db")
+        # context should still be visible in the func signature
+        sig = inspect.signature(bound.func)
+        assert "context" in sig.parameters
+        # but not in the schema (excluded by @tool)
+        assert "context" not in bound.parameters_schema["properties"]
+        # db should be gone from the schema (hidden from LLM)
+        assert "db" not in bound.parameters_schema["properties"]
+
+    def test_bind_optional_param(self):
+        @tool
+        def search(db: str, query: str, limit: int = 10):
+            """Search."""
+            return f"{db}:{query}:{limit}"
+
+        bound = search.bind(db="my_db")
+        required = bound.parameters_schema["required"]
+        assert "db" not in required
+        assert "query" in required
+        assert "limit" not in required
+        assert "limit" in bound.parameters_schema["properties"]
