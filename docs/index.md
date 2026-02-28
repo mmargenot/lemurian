@@ -378,12 +378,11 @@ class ModelProvider:
 
 **Provider implementations:**
 
-| Provider | Backend | Auth | Notes |
-|---|---|---|---|
-| `OpenAIProvider` | OpenAI API | `OPENAI_API_KEY` | Standard implementation |
-| `OpenRouter` | OpenRouter API | `OPENROUTER_API_KEY` | Custom base_url |
-| `VLLMProvider` | Local vLLM | None (dummy key) | Always sends `tool_choice="auto"` |
-| `ModalVLLMProvider` | Modal serverless | `MODAL_VLLM_API_KEY` | Conditional `tool_choice`, URL normalization |
+| Provider | Backend | Auth |
+|---|---|---|
+| `OpenAIProvider` | OpenAI | `OPENAI_API_KEY` |
+| `OpenRouter` | OpenRouter | `OPENROUTER_API_KEY` |
+| `VLLMProvider` | vLLM | `VLLM_API_KEY` |
 
 All providers use the `openai` Python package internally via
 `AsyncOpenAI`, taking advantage of the OpenAI-compatible API format
