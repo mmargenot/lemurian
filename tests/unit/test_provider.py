@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from lemurian.provider import (
-    ModalVLLMProvider,
     OpenAIProvider,
     OpenRouter,
     VLLMProvider,
@@ -41,30 +40,31 @@ def _fake_completion(content="hi", tool_calls=None):
 
 
 # ---------------------------------------------------------------------------
-# URL normalisation (existing tests)
+# VLLMProvider URL normalisation
 # ---------------------------------------------------------------------------
 
-def test_modal_provider_appends_v1():
-    p = ModalVLLMProvider(
-        endpoint_url="https://workspace--app.modal.run",
-        api_key="test",
-    )
+def test_vllm_provider_prepends_scheme():
+    p = VLLMProvider("localhost:8000")
+    assert p.base_url == "http://localhost:8000/v1"
+
+
+def test_vllm_provider_keeps_http_scheme():
+    p = VLLMProvider("http://192.168.1.10:8000")
+    assert p.base_url == "http://192.168.1.10:8000/v1"
+
+
+def test_vllm_provider_keeps_https_scheme():
+    p = VLLMProvider("https://workspace--app.modal.run")
     assert p.base_url == "https://workspace--app.modal.run/v1"
 
 
-def test_modal_provider_strips_trailing_slash():
-    p = ModalVLLMProvider(
-        endpoint_url="https://workspace--app.modal.run/",
-        api_key="test",
-    )
+def test_vllm_provider_strips_trailing_slash():
+    p = VLLMProvider("https://workspace--app.modal.run/")
     assert p.base_url == "https://workspace--app.modal.run/v1"
 
 
-def test_modal_provider_no_double_v1():
-    p = ModalVLLMProvider(
-        endpoint_url="https://workspace--app.modal.run/v1",
-        api_key="test",
-    )
+def test_vllm_provider_no_double_v1():
+    p = VLLMProvider("https://workspace--app.modal.run/v1")
     assert p.base_url == "https://workspace--app.modal.run/v1"
 
 
@@ -143,43 +143,16 @@ class TestOpenAIProviderComplete:
 
 
 # ---------------------------------------------------------------------------
-# VLLMProvider.complete — always sends tool_choice
+# VLLMProvider.complete — conditional tool_choice
 # ---------------------------------------------------------------------------
 
 class TestVLLMProviderComplete:
     @pytest.mark.asyncio
-    async def test_always_includes_tool_choice_auto(
-        self, monkeypatch
-    ):
-        """VLLMProvider always sends tool_choice='auto'."""
-        provider = VLLMProvider(url="localhost", port=8000)
-        mock_create = AsyncMock(
-            return_value=_fake_completion("ok")
-        )
-        monkeypatch.setattr(
-            provider.client.chat.completions, "create",
-            mock_create,
-        )
-
-        await provider.complete("llama", [], tools=None)
-
-        _, kwargs = mock_create.call_args
-        assert kwargs["tool_choice"] == "auto"
-
-
-# ---------------------------------------------------------------------------
-# ModalVLLMProvider.complete — conditional tool_choice
-# ---------------------------------------------------------------------------
-
-class TestModalVLLMProviderComplete:
-    @pytest.mark.asyncio
     async def test_includes_tool_choice_only_with_tools(
         self, monkeypatch
     ):
-        """ModalVLLMProvider only sends tool_choice when tools present."""
-        provider = ModalVLLMProvider(
-            endpoint_url="https://x.modal.run", api_key="k",
-        )
+        """VLLMProvider only sends tool_choice when tools present."""
+        provider = VLLMProvider("localhost:8000")
         mock_create = AsyncMock(
             return_value=_fake_completion("ok")
         )
@@ -189,7 +162,7 @@ class TestModalVLLMProviderComplete:
         )
 
         # Without tools — no tool_choice
-        await provider.complete("m", [], tools=None)
+        await provider.complete("llama", [], tools=None)
         _, kwargs = mock_create.call_args
         assert "tool_choice" not in kwargs
 
@@ -197,7 +170,7 @@ class TestModalVLLMProviderComplete:
 
         # With tools — tool_choice present
         tools = [{"type": "function", "function": {"name": "f"}}]
-        await provider.complete("m", [], tools=tools)
+        await provider.complete("llama", [], tools=tools)
         _, kwargs = mock_create.call_args
         assert kwargs["tool_choice"] == "auto"
 

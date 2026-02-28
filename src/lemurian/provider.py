@@ -189,67 +189,12 @@ class OpenRouter(ModelProvider):
 
 
 class VLLMProvider(ModelProvider):
-    """Provider for a locally-served vLLM instance.
+    """Provider for any vLLM endpoint, local or remote.
 
     Args:
-        url: Hostname or IP of the vLLM server.
-        port: Port the vLLM server is listening on.
-    """
-
-    system_name: str = "vllm"
-
-    def __init__(self, url: str, port: int):
-        self.base_url = f"http://{url}:{port}/v1"
-        self.client = AsyncOpenAI(base_url=self.base_url, api_key="DUMMY")
-
-    async def complete(
-            self,
-            model: str,
-            messages: list[dict],
-            tools: list[dict] | None = None,
-    ):
-        kwargs: dict = {
-            "model": model,
-            "messages": messages,
-            "tool_choice": "auto",
-        }
-        if tools:
-            kwargs["tools"] = tools
-        response = await self.client.chat.completions.create(**kwargs)
-        msg = response.choices[0].message
-        return CompletionResult(
-            content=msg.content,
-            tool_calls=msg.tool_calls,
-            usage=getattr(response, "usage", None),
-            response_model=getattr(response, "model", None),
-        )
-
-    async def structured_completion(
-            self,
-            model: str,
-            messages: list[dict],
-            response_model: BaseModel,
-    ):
-        response = await self.client.beta.chat.completions.parse(
-            model=model,
-            messages=messages,  # type: ignore[arg-type]  # OpenAI SDK overloaded unions
-            response_format=response_model,  # type: ignore[arg-type]
-            extra_body=dict(guided_decoding_backend="outlines"),
-        )
-        return response.output_parsed  # type: ignore[attr-defined]
-
-
-class ModalVLLMProvider(ModelProvider):
-    """Provider for vLLM deployed on Modal.
-
-    Connects to a vLLM instance hosted on Modal's serverless
-    infrastructure. Deploy with ``modal deploy examples/modal_vllm.py``.
-
-    Args:
-        endpoint_url: The Modal deployment URL
-            (e.g. ``https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run``).
-        api_key: Optional API key. Falls back to the
-            ``MODAL_VLLM_API_KEY`` environment variable, or ``"DUMMY"``.
+        url: Address of the vLLM endpoint. Normalized automatically:
+            no scheme → ``http://`` prepended, ``/v1`` appended if
+            missing, trailing slashes stripped.
         timeout: Request timeout in seconds.
         max_retries: Maximum retries for failed requests.
     """
@@ -258,27 +203,24 @@ class ModalVLLMProvider(ModelProvider):
 
     def __init__(
         self,
-        endpoint_url: str,
-        api_key: str | None = None,
+        url: str,
         timeout: float = 300.0,
         max_retries: int = 3,
     ):
-        self.endpoint_url = endpoint_url.rstrip("/")
-        if not self.endpoint_url.endswith("/v1"):
-            self.base_url = f"{self.endpoint_url}/v1"
-        else:
-            self.base_url = self.endpoint_url
+        normalized = url.rstrip("/")
+        if not normalized.startswith(("http://", "https://")):
+            normalized = f"http://{normalized}"
+        if not normalized.endswith("/v1"):
+            normalized = f"{normalized}/v1"
+        self.base_url = normalized
 
-        if not api_key:
-            api_key = os.getenv("MODAL_VLLM_API_KEY", "DUMMY")
-
+        api_key = os.getenv("VLLM_API_KEY", "DUMMY")
         self.client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=api_key,
             timeout=timeout,
             max_retries=max_retries,
         )
-        logger.info(f"Initialized ModalVLLMProvider with endpoint: {self.base_url}")
 
     async def complete(
             self,
@@ -310,7 +252,7 @@ class ModalVLLMProvider(ModelProvider):
     ):
         response = await self.client.beta.chat.completions.parse(
             model=model,
-            messages=messages,  # type: ignore[arg-type]  # OpenAI SDK overloaded unions
+            messages=messages,  # type: ignore[arg-type]
             response_format=response_model,  # type: ignore[arg-type]
             extra_body=dict(guided_decoding_backend="outlines"),
         )

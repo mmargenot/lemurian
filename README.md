@@ -221,55 +221,28 @@ provider = OpenAIProvider()    # uses OPENAI_API_KEY env var
 provider = OpenRouter()        # uses OPENROUTER_API_KEY env var
 ```
 
-### Local vLLM
+### vLLM
 
-Serve a model with vLLM:
+`VLLMProvider` connects to any vLLM endpoint — local or remote:
+
+```python
+from lemurian.provider import VLLMProvider
+
+provider = VLLMProvider("localhost:8000")
+provider = VLLMProvider("https://your-workspace-vllm-server.modal.run")
+```
+
+Serve a model locally:
 ```bash
-uv run --extra local vllm serve "Qwen/Qwen3-8B" \
+uv run --group local vllm serve "Qwen/Qwen3-8B" \
     --enable-auto-tool-choice \
     --tool-call-parser hermes \
     --reasoning-parser qwen3
 ```
 
-```python
-from lemurian.provider import VLLMProvider
-
-provider = VLLMProvider(url="localhost", port=8000)
-```
-
 Refer to the [vLLM docs](https://qwen.readthedocs.io/en/latest/deployment/vllm.html#parsing-tool-calls) to pair the appropriate tool call parser with your model.
 
-### Modal vLLM (Remote/Serverless)
-
-Deploy vLLM to [Modal](https://modal.com) for serverless GPU inference:
-
-```bash
-uv sync --group modal
-modal setup
-modal deploy examples/modal_vllm.py
-```
-
-```python
-from lemurian.provider import ModalVLLMProvider
-
-provider = ModalVLLMProvider(
-    endpoint_url="https://your-workspace--lemurian-vllm-vllmserver-serve.modal.run"
-)
-```
-
-Customize deployments with environment variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `MODEL_ID` | `Qwen/Qwen3-8B` | HuggingFace model ID |
-| `GPU_TYPE` | `A100` | Modal GPU type (A10G, A100, H100) |
-| `GPU_COUNT` | `1` | Number of GPUs for tensor parallelism |
-| `MAX_MODEL_LEN` | `8192` | Maximum sequence length |
-
-Pre-download model weights for faster cold starts:
-```bash
-modal run examples/modal_vllm.py --download
-```
+For serverless GPU inference on [Modal](https://modal.com), see [`scripts/modal_deploy.py`](scripts/modal_deploy.py).
 
 ## Testing
 
