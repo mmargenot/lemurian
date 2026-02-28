@@ -7,20 +7,11 @@ Demonstrates:
 - OpenTelemetry tracing with ConsoleSpanExporter
 
 Usage:
-    Add OPENAI_API_KEY=sk-... to .env, then:
-    uv run --env-file=.env examples/local_research_agent.py
+    uv run --env-file=.env examples/local_research_agent_example.py --provider openai --model gpt-4o-mini --trace
+    uv run examples/local_research_agent_example.py --provider vllm --url localhost:8000 --model Qwen/Qwen3-8B --trace
 """
 
-from lemurian.agent import Agent
-from lemurian.capability import Capability
-from lemurian.message import Message, MessageRole
-from lemurian.provider import OpenAIProvider
-from lemurian.runner import Runner
-from lemurian.session import Session
-from lemurian.state import State
-from lemurian.tools import Tool, tool, LLMRecoverableError
-from lemurian.instrumentation import instrument, uninstrument
-
+import argparse
 import asyncio
 import concurrent.futures
 import os
@@ -30,8 +21,46 @@ import uuid
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer
 import faiss
+from transformers import AutoTokenizer
+
+from lemurian.agent import Agent
+from lemurian.capability import Capability
+from lemurian.message import Message, MessageRole
+from lemurian.provider import ModelProvider, OpenAIProvider, OpenRouter, VLLMProvider
+from lemurian.runner import Runner
+from lemurian.session import Session
+from lemurian.state import State
+from lemurian.tools import Tool, tool, LLMRecoverableError
+
+PROVIDERS = {
+    "openai": lambda url: OpenAIProvider(),
+    "openrouter": lambda url: OpenRouter(),
+    "vllm": lambda url: VLLMProvider(url),
+}
+
+
+def make_provider(provider: str, url: str | None) -> ModelProvider:
+    if provider == "vllm" and not url:
+        raise SystemExit("--url is required for vllm provider")
+    return PROVIDERS[provider](url)
+
+
+def setup_tracing(service_name: str):
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (
+        SimpleSpanProcessor, ConsoleSpanExporter,
+    )
+    from lemurian.instrumentation import instrument
+
+    provider = TracerProvider(
+        resource=Resource({SERVICE_NAME: service_name})
+    )
+    provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+    instrument()
 
 
 class ResearchCapability(Capability):
@@ -205,39 +234,37 @@ class ResearchCapability(Capability):
         return [exact_search_files, semantic_search_files, open_file]
 
 
-provider = OpenAIProvider()
-local_file_directory = pathlib.Path(__file__).parent / "local_research_agent_docs"
-local_research_agent = Agent(
-    name="research_assistant",
-    description=(
-        "A research assistant with the ability to search over a local file "
-        "system."
-    ),
-    system_prompt=(
-        "You are a research assistant. Use your knowledge base tools to "
-        "store, search, and organize notes for the user. When asked to "
-        "remember something, store it as a note with an appropriate topic. "
-        "When asked to recall something, search the knowledge base."
-    ),
-    capabilities=[ResearchCapability(local_file_directory, include_vectors=True)],
-    model="gpt-4o-mini",
-    provider=provider,
-)
-
-
 async def main():
-    from opentelemetry import trace
-    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
+    parser = argparse.ArgumentParser(description="Local research agent")
+    parser.add_argument("--provider", choices=PROVIDERS, default="openai")
+    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--url", default=None)
+    parser.add_argument("--trace", action="store_true")
+    args = parser.parse_args()
 
-    tracer_provider = TracerProvider(
-        resource=Resource({SERVICE_NAME: "local-research-agent"})
+    if args.trace:
+        setup_tracing("local-research-agent")
+
+    provider = make_provider(args.provider, args.url)
+
+    local_file_directory = pathlib.Path(__file__).parent / "local_research_agent_docs"
+    agent = Agent(
+        name="research_assistant",
+        description=(
+            "A research assistant with the ability to search over a local file "
+            "system."
+        ),
+        system_prompt=(
+            "You are a research assistant. Use your knowledge base tools to "
+            "store, search, and organize notes for the user. When asked to "
+            "remember something, store it as a note with an appropriate topic. "
+            "When asked to recall something, search the knowledge base."
+        ),
+        capabilities=[ResearchCapability(local_file_directory, include_vectors=True)],
+        model=args.model,
+        provider=provider,
     )
-    tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-    trace.set_tracer_provider(tracer_provider)
 
-    instrument()
     runner = Runner()
     session = Session(session_id=str(uuid.uuid4()))
     state = State()
@@ -255,11 +282,10 @@ async def main():
             Message(role=MessageRole.USER, content=user_input)
         )
         result = await runner.run(
-            agent=local_research_agent, session=session, state=state
+            agent=agent, session=session, state=state
         )
         print(f"Assistant: {result.last_message.content}\n")
 
-    uninstrument()
 
 
 if __name__ == "__main__":

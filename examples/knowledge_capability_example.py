@@ -7,19 +7,49 @@ Demonstrates what makes a good Capability:
 - Fully self-contained — tools never reach into shared application state
 
 Usage:
-    Add OPENAI_API_KEY=sk-... to .env, then:
-    uv run --env-file=.env examples/capabilities.py
+    uv run --env-file=.env examples/knowledge_capability_example.py --provider openai --model gpt-4o-mini --trace
+    uv run examples/knowledge_capability_example.py --provider vllm --url localhost:8000 --model Qwen/Qwen3-8B --trace
 """
 
+import argparse
 import asyncio
 import sqlite3
 
 from lemurian.agent import Agent
 from lemurian.capability import Capability
-from lemurian.provider import OpenAIProvider
+from lemurian.provider import ModelProvider, OpenAIProvider, OpenRouter, VLLMProvider
 from lemurian.state import State
 from lemurian.swarm import Swarm
 from lemurian.tools import Tool, tool
+
+PROVIDERS = {
+    "openai": lambda url: OpenAIProvider(),
+    "openrouter": lambda url: OpenRouter(),
+    "vllm": lambda url: VLLMProvider(url),
+}
+
+
+def make_provider(provider: str, url: str | None) -> ModelProvider:
+    if provider == "vllm" and not url:
+        raise SystemExit("--url is required for vllm provider")
+    return PROVIDERS[provider](url)
+
+
+def setup_tracing(service_name: str):
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import (
+        SimpleSpanProcessor, ConsoleSpanExporter,
+    )
+    from lemurian.instrumentation import instrument
+
+    provider = TracerProvider(
+        resource=Resource({SERVICE_NAME: service_name})
+    )
+    provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+    instrument()
 
 
 # ---------------------------------------------------------------------------
@@ -153,32 +183,36 @@ class KnowledgeBaseCapability(Capability):
 # Agent setup
 # ---------------------------------------------------------------------------
 
-provider = OpenAIProvider()
-
-assistant = Agent(
-    name="assistant",
-    description="A research assistant with a persistent knowledge base.",
-    system_prompt=(
-        "You are a research assistant. Use your knowledge base tools to "
-        "store, search, and organize notes for the user. When asked to "
-        "remember something, store it as a note with an appropriate topic. "
-        "When asked to recall something, search the knowledge base."
-    ),
-    capabilities=[KnowledgeBaseCapability("/tmp/lemurian_kb_example.db")],
-    model="gpt-4o-mini",
-    provider=provider,
-)
-
-
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
 async def main():
+    parser = argparse.ArgumentParser(description="Knowledge base agent")
+    parser.add_argument("--provider", choices=PROVIDERS, default="openai")
+    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--url", default=None)
+    parser.add_argument("--trace", action="store_true")
+    args = parser.parse_args()
+
+    if args.trace:
+        setup_tracing("knowledge-base-agent")
+
+    provider = make_provider(args.provider, args.url)
+
+    assistant = Agent(
+        name="assistant",
+        description="A research assistant with a persistent knowledge base.",
+        system_prompt=(
+            "You are a research assistant. Use your knowledge base tools to "
+            "store, search, and organize notes for the user. When asked to "
+            "remember something, store it as a note with an appropriate topic. "
+            "When asked to recall something, search the knowledge base."
+        ),
+        capabilities=[KnowledgeBaseCapability("/tmp/lemurian_kb_example.db")],
+        model=args.model,
+        provider=provider,
+    )
+
     swarm = Swarm(agents=[assistant])
 
-    print("Note-taking Assistant (with a DB)")
-    print()
+    print("Note-taking Assistant (with a DB)\n")
 
     first = True
     while True:
