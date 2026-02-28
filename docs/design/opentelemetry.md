@@ -136,9 +136,6 @@ class OpenRouter(ModelProvider):
 
 class VLLMProvider(ModelProvider):
     system_name: str = "vllm"
-
-class ModalVLLMProvider(ModelProvider):
-    system_name: str = "vllm"
 ```
 
 ### 2. `instrumentation.py` — Tracing Module
