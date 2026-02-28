@@ -8,10 +8,12 @@
 |---|---|---|
 | **Orchestration** | Swarm | Registers agents, creates handoff tool, manages handoff loop, tracks active agent |
 | **Execution** | Runner | Mediates all transcript access: builds messages for provider, injects system prompt, appends responses and tool results, detects handoffs |
-| **Interface** | Context, Tools, Provider | Tools use Context to access state/session/agent. Provider receives pre-built messages and schemas. |
+| **Interface** | Context, Tools, Capabilities, Provider | Tools use Context to access state/session/agent. Capabilities define collections of tools with their own state. Provider receives pre-built messages and schemas. |
 | **Data** | Session, State | Session holds the transcript (ground truth). State holds typed application data. |
 
 **Tool** — A `@tool`-decorated Python function exposed to an LLM. Schema is generated from the function signature. Receives a `Context` for accessing state, session, and agent.
+
+**Capability** - A `Capability` groups tools into a coherent subcomponent of an `Agent` that can be applied to a single agent or across all Agents in a swarm. Tools within a Capability share access to state that they can manipulate, independently of the `Swarm` state.
 
 **Agent** — Declarative Pydantic model bundling a system prompt, tools, model name, and provider. Agents don't run themselves — the Runner executes them.
 
@@ -148,6 +150,65 @@ asyncio.run(main())
 ```
 
 The Swarm automatically creates a `handoff` tool for each agent with an enum of available targets. When triage calls `handoff(agent_name="billing", message="...")`, the Swarm switches context to the billing agent.
+
+## Capabilities
+
+A `Capability` groups related tools with their own encapsulated resources:
+
+```python
+import sqlite3
+from lemurian.capability import Capability
+from lemurian.tools import Tool, tool
+
+class KnowledgeBaseCapability(Capability):
+    def __init__(self, db_path: str = ":memory:"):
+        super().__init__("knowledge_base")
+        self._conn = sqlite3.connect(db_path)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS notes (topic TEXT, content TEXT)"
+        )
+
+    def tools(self) -> list[Tool]:
+        conn = self._conn
+
+        @tool
+        def store_note(topic: str, content: str):
+            """Store a note under a topic."""
+            conn.execute(
+                "INSERT INTO notes VALUES (?, ?)", (topic, content)
+            )
+            conn.commit()
+            return f"Stored note under '{topic}'."
+
+        @tool
+        def search_notes(query: str):
+            """Search notes by keyword."""
+            rows = conn.execute(
+                "SELECT topic, content FROM notes WHERE content LIKE ?",
+                (f"%{query}%",),
+            ).fetchall()
+            return [{"topic": r[0], "content": r[1]} for r in rows]
+
+        return [store_note, search_notes]
+
+    def on_attach(self, state):
+        print("[KnowledgeBase] Connected.")
+
+    def on_detach(self, state):
+        self._conn.close()
+```
+
+Attach capabilities to individual agents or across an entire swarm:
+
+```python
+agent = Agent(
+    name="researcher",
+    system_prompt="You are a research assistant.",
+    capabilities=[KnowledgeBaseCapability("notes.db")],
+    model="gpt-4o-mini",
+    provider=OpenAIProvider(),
+)
+```
 
 ## Model Providers
 
