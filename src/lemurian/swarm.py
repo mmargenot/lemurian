@@ -1,12 +1,18 @@
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from lemurian.agent import Agent
 from lemurian.capability import Capability
+from lemurian.events import (
+    HandoffEvent,
+    RunCompleteEvent,
+    StreamEvent,
+)
 from lemurian.handoff import Handoff
 from lemurian.message import Message, MessageRole
-from lemurian.runner import Runner
+from lemurian.runner import Runner, RunResult
 from lemurian.session import Session
 from lemurian.state import State
 
@@ -160,6 +166,31 @@ class Swarm:
         resolved.capabilities = []
         return resolved
 
+    def _init_session(
+        self, user_message: str, agent: str | None,
+    ) -> None:
+        """Set up session and active agent, append user message."""
+        if self.session is None:
+            if agent is None:
+                raise ValueError(
+                    "agent must be specified on the first "
+                    "call to run()"
+                )
+            self.session = Session(
+                session_id=str(uuid.uuid4())
+            )
+            self.active_agent_name = agent
+            self.context_start = 0
+        elif agent is not None:
+            self.active_agent_name = agent
+
+        self.session.transcript.append(
+            Message(
+                role=MessageRole.USER,
+                content=user_message,
+            )
+        )
+
     async def run(
         self,
         user_message: str,
@@ -186,31 +217,47 @@ class Swarm:
                 call, or if a handoff tool name collides with a
                 regular tool name.
         """
-        # First call — initialise session and active agent
-        if self.session is None:
-            if agent is None:
-                raise ValueError(
-                    "agent must be specified on the first "
-                    "call to run()"
-                )
-            self.session = Session(
-                session_id=str(uuid.uuid4())
+        last_result = None
+        async for event in self.iter(
+            user_message, agent,
+        ):
+            if isinstance(event, RunCompleteEvent):
+                last_result = event.result
+        if last_result is None:
+            raise RuntimeError(
+                "iter() ended without emitting "
+                "RunCompleteEvent"
             )
-            self.active_agent_name = agent
-            self.context_start = 0
-        elif agent is not None:
-            self.active_agent_name = agent
-
-        # Append user message to transcript
-        self.session.transcript.append(
-            Message(
-                role=MessageRole.USER, content=user_message
-            )
+        assert self.active_agent_name is not None
+        assert self.session is not None
+        return SwarmResult(
+            last_message=last_result.last_message,
+            active_agent=self.active_agent_name,
+            session=self.session,
+            state=self.state,
         )
 
-        assert self.active_agent_name is not None
+    async def iter(
+        self,
+        user_message: str,
+        agent: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Streaming entry point. Yields events including handoffs.
 
-        # Handoff loop
+        Args:
+            user_message: The user's message to append to the
+                transcript.
+            agent: Name of the agent to run.  Required on first
+                call, optional thereafter.
+
+        Yields:
+            StreamEvent subclasses as execution progresses.
+        """
+        self._init_session(user_message, agent)
+        assert self.active_agent_name is not None
+        assert self.session is not None
+        session = self.session
+
         for _ in range(self.max_handoffs + 1):
             current_agent = self.agents[
                 self.active_agent_name
@@ -220,36 +267,43 @@ class Swarm:
             )
             handoffs = self._resolve_handoffs(current_agent)
 
-            # Validate no name collisions between tools and
-            # handoffs
+            # Validate no name collisions between tools
+            # and handoffs
             tool_names = set(
                 resolved_agent.tool_registry.keys()
             )
             for h in handoffs:
                 if h.tool_name in tool_names:
                     raise ValueError(
-                        f"Handoff tool name '{h.tool_name}' "
+                        f"Handoff tool name "
+                        f"'{h.tool_name}' "
                         "collides with an existing tool"
                     )
 
-            result = await self.runner.run(
+            last_run_result = None
+            async for event in self.runner.iter(
                 agent=resolved_agent,
-                session=self.session,
+                session=session,
                 state=self.state,
                 context_start=self.context_start,
                 handoffs=handoffs,
-            )
+            ):
+                if isinstance(event, RunCompleteEvent):
+                    last_run_result = event.result
+                else:
+                    yield event
 
-            if result.hand_off is None:
-                return SwarmResult(
-                    last_message=result.last_message,
-                    active_agent=self.active_agent_name,
-                    session=self.session,
-                    state=self.state,
+            if last_run_result is None:
+                return
+
+            if last_run_result.hand_off is None:
+                yield RunCompleteEvent(
+                    result=last_run_result,
                 )
+                return
 
             # Validate handoff target exists
-            target = result.hand_off.target_agent
+            target = last_run_result.hand_off.target_agent
             if target not in self.agents:
                 logger.warning(
                     f"Handoff target '{target}' not found"
@@ -257,27 +311,39 @@ class Swarm:
                 error_msg = Message(
                     role=MessageRole.ASSISTANT,
                     content=(
-                        f"Error: agent '{target}' not found."
+                        f"Error: agent '{target}' "
+                        "not found."
                     ),
                 )
-                self.session.transcript.append(error_msg)
-                return SwarmResult(
-                    last_message=error_msg,
-                    active_agent=self.active_agent_name,
-                    session=self.session,
-                    state=self.state,
+                session.transcript.append(error_msg)
+                yield RunCompleteEvent(
+                    result=RunResult(
+                        last_message=error_msg,
+                        agent_name=(
+                            self.active_agent_name
+                        ),
+                    )
                 )
+                return
 
-            # Handoff — append handoff message as user context
-            # for the new agent
-            self.session.transcript.append(
+            # Handoff — emit event and advance context
+            yield HandoffEvent(
+                source_agent=self.active_agent_name,
+                target_agent=target,
+                message=(
+                    last_run_result.hand_off.message
+                ),
+            )
+            session.transcript.append(
                 Message(
                     role=MessageRole.USER,
-                    content=result.hand_off.message,
+                    content=(
+                        last_run_result.hand_off.message
+                    ),
                 )
             )
             self.context_start = (
-                len(self.session.transcript) - 1
+                len(session.transcript) - 1
             )
             self.active_agent_name = target
             logger.info(
@@ -293,10 +359,10 @@ class Swarm:
                 "Please try again."
             ),
         )
-        self.session.transcript.append(error_msg)
-        return SwarmResult(
-            last_message=error_msg,
-            active_agent=self.active_agent_name,
-            session=self.session,
-            state=self.state,
+        session.transcript.append(error_msg)
+        yield RunCompleteEvent(
+            result=RunResult(
+                last_message=error_msg,
+                agent_name=self.active_agent_name,
+            )
         )
