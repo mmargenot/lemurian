@@ -1,15 +1,13 @@
 from lemurian.message import MessageRole, ToolCallRequestMessage
-from tests.conftest import MockFunction, MockToolCall
+from lemurian.streaming import ToolCall
 
 
 def test_tool_call_request_serializes_raw_objects():
-    """The custom serializer transforms OpenAI-style objects into dicts."""
-    tc = MockToolCall(
+    """The custom serializer transforms ToolCall objects into dicts."""
+    tc = ToolCall(
         id="call_abc",
-        type="function",
-        function=MockFunction(
-            name="greet", arguments='{"name": "world"}'
-        ),
+        name="greet",
+        arguments='{"name": "world"}',
     )
     msg = ToolCallRequestMessage(
         role=MessageRole.ASSISTANT,

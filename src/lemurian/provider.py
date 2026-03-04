@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 import os
 import logging
+
+from lemurian.streaming import StreamChunk, ToolCallFragment
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -58,6 +61,20 @@ class ModelProvider:
         """
         pass
 
+    async def stream_complete(
+            self,
+            model: str,
+            messages: list[dict],
+            tools: list[dict] | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Stream a chat completion as StreamChunk objects.
+
+        Subclasses should override this. The default raises
+        NotImplementedError.
+        """
+        raise NotImplementedError
+        yield  # make this a generator  # pragma: no cover
+
     async def structured_completion(
             self,
             model: str,
@@ -75,6 +92,63 @@ class ModelProvider:
             The parsed response matching the response_model.
         """
         pass
+
+
+async def _openai_stream_complete(
+    client: AsyncOpenAI,
+    model: str,
+    messages: list[dict],
+    tools: list[dict] | None = None,
+    **extra_kwargs,
+) -> AsyncIterator[StreamChunk]:
+    """Shared streaming helper for all OpenAI-SDK-based providers."""
+    kwargs: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        kwargs["tools"] = tools
+    kwargs.update(extra_kwargs)
+
+    stream = await client.chat.completions.create(**kwargs)
+    async for chunk in stream:
+        sc_kwargs: dict = {}
+
+        # Extract usage from final chunk
+        if hasattr(chunk, "usage") and chunk.usage is not None:
+            sc_kwargs["usage"] = chunk.usage
+        if hasattr(chunk, "model") and chunk.model is not None:
+            sc_kwargs["response_model"] = chunk.model
+
+        choice = chunk.choices[0] if chunk.choices else None
+        if choice is None:
+            if sc_kwargs:
+                yield StreamChunk(**sc_kwargs)
+            continue
+
+        delta = choice.delta
+        fragments = None
+        if delta.tool_calls:
+            fragments = [
+                ToolCallFragment(
+                    index=tc.index,
+                    call_id=tc.id,
+                    name=tc.function.name if tc.function else None,
+                    arguments_delta=(
+                        tc.function.arguments if tc.function else None
+                    ),
+                )
+                for tc in delta.tool_calls
+            ]
+
+        yield StreamChunk(
+            content_delta=delta.content,
+            tool_call_fragments=fragments,
+            finish_reason=choice.finish_reason,
+            **sc_kwargs,
+        )
 
 
 class OpenAIProvider(ModelProvider):
@@ -117,6 +191,12 @@ class OpenAIProvider(ModelProvider):
             usage=getattr(response, "usage", None),
             response_model=getattr(response, "model", None),
         )
+
+    async def stream_complete(self, model, messages, tools=None):
+        async for chunk in _openai_stream_complete(
+            self.client, model, messages, tools,
+        ):
+            yield chunk
 
     async def structured_completion(
             self,
@@ -173,6 +253,12 @@ class OpenRouter(ModelProvider):
             usage=getattr(response, "usage", None),
             response_model=getattr(response, "model", None),
         )
+
+    async def stream_complete(self, model, messages, tools=None):
+        async for chunk in _openai_stream_complete(
+            self.client, model, messages, tools,
+        ):
+            yield chunk
 
     async def structured_completion(
             self,
@@ -243,6 +329,13 @@ class VLLMProvider(ModelProvider):
             usage=getattr(response, "usage", None),
             response_model=getattr(response, "model", None),
         )
+
+    async def stream_complete(self, model, messages, tools=None):
+        extra = {"tool_choice": "auto"} if tools else {}
+        async for chunk in _openai_stream_complete(
+            self.client, model, messages, tools, **extra,
+        ):
+            yield chunk
 
     async def structured_completion(
             self,
